@@ -344,11 +344,13 @@ async function loadModels() {
   });
   handsInstance.onResults(onHandResults);
 
-  statusEl.textContent = 'Downloading models…';
+  statusEl.textContent = 'Downloading hand model…';
+  // Warm up with a single frame to trigger model download
   const dummy = document.createElement('canvas');
   dummy.width = 64; dummy.height = 48;
+  await handsInstance.send({ image: dummy });
 
-  // Face Mesh (parallel with Hands)
+  statusEl.textContent = 'Downloading face model…';
   faceMeshInstance = new FaceMesh({
     locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
   });
@@ -359,12 +361,7 @@ async function loadModels() {
     minTrackingConfidence: 0.5,
   });
   faceMeshInstance.onResults(onFaceResults);
-
-  // Load both models in parallel
-  await Promise.all([
-    handsInstance.send({ image: dummy }),
-    faceMeshInstance.send({ image: dummy }),
-  ]);
+  await faceMeshInstance.send({ image: dummy });
 
   statusEl.textContent = 'Ready!';
   btnEl.style.display = 'block';
