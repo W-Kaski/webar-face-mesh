@@ -15,11 +15,13 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 #loading p{font-size:13px;color:rgba(255,255,255,0.6);text-align:center;line-height:1.8}
 #btn{margin-top:12px;padding:10px 28px;border:none;border-radius:20px;background:#64ffda;color:#000;font-size:14px;font-weight:600;cursor:pointer;display:none}
 #hud{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:50;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);color:rgba(255,255,255,0.85);padding:8px 20px;border-radius:20px;font-size:12px;pointer-events:none;opacity:0;transition:opacity 0.5s}
+#debug{position:fixed;top:10px;left:10px;z-index:100;background:rgba(0,0,0,0.75);color:#64ffda;padding:8px 12px;border-radius:8px;font-size:11px;font-family:monospace;pointer-events:none;line-height:1.6}
 </style>
 </head>
 <body>
 <div id="loading"><div class="spinner"></div><p id="status">Loading models…</p><button id="btn" onclick="startCamera()">Start Camera</button></div>
 <div id="hud">Show both hands to the camera</div>
+<div id="debug">Waiting for camera…</div>
 <video id="video" autoplay playsinline muted></video>
 <canvas id="three-canvas"></canvas>
 
@@ -42,12 +44,14 @@ const EFFECTS = [
 
 // ─── State ──────────────────────────────────────────────────────────────
 let smoothHands = [null, null];
+let handLastSeen = [0, 0];
 let handsInstance = null;
 let segmentationInstance = null;
 let videoTexture = null;
 let maskTexture = null;
 let hasMask = false;
 let gl = null;
+let grabTarget = null;
 
 // ─── DOM ────────────────────────────────────────────────────────────────
 const videoEl = document.getElementById('video');
@@ -56,6 +60,7 @@ const loadingEl = document.getElementById('loading');
 const statusEl = document.getElementById('status');
 const btnEl = document.getElementById('btn');
 const hudEl = document.getElementById('hud');
+const debugEl = document.getElementById('debug');
 
 // ─── Three.js ───────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
@@ -66,7 +71,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x000000, 1);
+renderer.setClearColor(0x000000, 0);
 renderer.autoClear = false;
 
 // ─── Dummy textures ─────────────────────────────────────────────────────
@@ -75,7 +80,7 @@ DUMMY_TEX.needsUpdate = true;
 const DUMMY_MASK = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
 DUMMY_MASK.needsUpdate = true;
 
-// ─── FIX 1: Grab texture via readPixels → DataTexture (Three.js compatible) ──
+// ─── Grab texture: offscreen render target → readPixels → DataTexture ───
 let grabPixels = null;
 const grabTex = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
 grabTex.needsUpdate = true;
@@ -84,6 +89,11 @@ function initGrabTexture() {
   gl = renderer.getContext();
   const w = renderer.domElement.width;
   const h = renderer.domElement.height;
+  grabTarget = new THREE.WebGLRenderTarget(w, h, {
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    generateMipmaps: false,
+  });
   grabPixels = new Uint8Array(w * h * 4);
   grabTex.image = { data: grabPixels, width: w, height: h };
   grabTex.needsUpdate = true;
@@ -92,14 +102,15 @@ function initGrabTexture() {
 function grabScreen() {
   const w = renderer.domElement.width;
   const h = renderer.domElement.height;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  renderer.setRenderTarget(grabTarget);
+  renderer.clear(true, false, false);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, grabPixels);
   grabTex.needsUpdate = true;
-  // Force Three.js to re-upload the texture
-  renderer.state.unbindTexture();
 }
 
-// ─── Camera background ──────────────────────────────────────────────────
+// ─── Camera background (for grab pass, hidden during rendering) ─────────
 const camBG = new THREE.Mesh(
   new THREE.PlaneGeometry(2, 2),
   new THREE.MeshBasicMaterial({ map: DUMMY_TEX, depthTest: false, depthWrite: false })
@@ -108,7 +119,16 @@ camBG.renderOrder = 0;
 camBG.frustumCulled = false;
 scene.add(camBG);
 
-// ─── FIX 2: Stencil quads with explicit stencilWriteMask ────────────────
+// ─── Camera base layer (always visible, shows video feed) ───────────────
+const camBase = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.MeshBasicMaterial({ map: DUMMY_TEX, depthTest: false, depthWrite: false })
+);
+camBase.renderOrder = 0;
+camBase.frustumCulled = false;
+scene.add(camBase);
+
+// ─── Stencil quads with explicit stencilWriteMask ───────────────────────
 const stencilQuads = [];
 const stencilLines = [];
 const quadGroup = new THREE.Group();
@@ -125,6 +145,8 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     colorWrite: false,
     depthTest: false,
     depthWrite: false,
+    transparent: true,
+    opacity: 1,
     stencilWrite: true,
     stencilWriteMask: 0xFF,
     stencilRef: eff.stencilRef,
@@ -152,7 +174,7 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   stencilLines.push({ line, geo: lineGeo });
 }
 
-// ─── FIX 3: Effect passes with per-quad stencilRef (no overlap) ─────────
+// ─── Effect passes with per-quad stencilRef (no overlap) ────────────────
 const EFFECT_VERT = `
   varying vec2 vUv;
   void main() {
@@ -274,10 +296,14 @@ function ribbonAnchor(landmarks, tipIdx, handSide) {
 // ─── MediaPipe callbacks ────────────────────────────────────────────────
 function onHandResults(results) {
   const raw = (results.multiHandLandmarks || []).slice();
-  if (raw.length === 0) { smoothHands = [null, null]; return; }
+  console.log('[Hands] detected:', raw.length);
+  if (raw.length === 0) return;
   if (raw.length === 2) raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
-  const next = [null, null];
-  for (let h = 0; h < raw.length; h++) next[h] = smoothLandmarks(smoothHands[h], raw[h], SMOOTHING);
+  const next = [smoothHands[0], smoothHands[1]];
+  for (let h = 0; h < raw.length; h++) {
+    next[h] = smoothLandmarks(smoothHands[h], raw[h], SMOOTHING);
+    handLastSeen[h] = performance.now();
+  }
   smoothHands = next;
 }
 
@@ -334,6 +360,7 @@ async function startCamera() {
     videoTexture.generateMipmaps = false;
 
     camBG.material.map = videoTexture;
+    camBase.material.map = videoTexture;
 
     initGrabTexture();
 
@@ -357,32 +384,45 @@ async function startCamera() {
     }
     track();
 
-    // FIX 4+5: Two-pass render with proper state management
+    // Two-pass render with camera base layer
     function render() {
       const currentMask = maskTexture || DUMMY_MASK;
 
-      // Pass 1: Render camera background → grab
+      // Pass 1: Grab clean camera background to offscreen target
       camBG.visible = true;
+      camBase.visible = false;
       quadGroup.visible = false;
       for (const ep of effectPasses) ep.mesh.visible = false;
-      renderer.clear(true, true, true);
-      renderer.render(scene, camera);
       grabScreen();
 
-      // Pass 2: Stencil write + effect (keep color from pass 1)
+      // Pass 2: Camera base + stencil quads + effect passes
+      gl.clear(gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
       camBG.visible = false;
-      quadGroup.visible = true;
+      camBase.visible = true;
       for (const ep of effectPasses) {
         ep.mesh.visible = true;
         ep.mat.uniforms.uGrab.value = grabTex;
         ep.mat.uniforms.uMask.value = currentMask;
         ep.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
       }
+
+      // Fade out quads after both hands lost for >1 second
+      const now = performance.now();
+      const fade = Math.max(0, 1 - (now - Math.min(handLastSeen[0], handLastSeen[1])) / 1000);
+      for (let i = 0; i < QUAD_COUNT; i++) {
+        stencilQuads[i].mat.opacity = fade;
+        stencilLines[i].line.material.opacity = 0.86 * fade;
+      }
+
       updateQuads();
-      // Clear depth+stencil only, preserve color
-      renderer.state.buffers.depth.setMask(true);
-      renderer.state.buffers.stencil.setMask(true);
-      gl.clear(gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+
+      // Diagnostic display
+      debugEl.textContent =
+        'hands: ' + (smoothHands[0] ? 'L' : '-') + (smoothHands[1] ? 'R' : '-') +
+        '  fade: ' + fade.toFixed(2) +
+        '  quads: ' + (quadGroup.visible ? 'on' : 'off') +
+        '  mask: ' + (hasMask ? 'yes' : 'no');
+
       renderer.render(scene, camera);
 
       requestAnimationFrame(render);
@@ -443,7 +483,17 @@ function updateQuads() {
 }
 
 // ─── Resize ─────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  if (grabTarget) {
+    const w = renderer.domElement.width;
+    const h = renderer.domElement.height;
+    grabTarget.setSize(w, h);
+    grabPixels = new Uint8Array(w * h * 4);
+    grabTex.image = { data: grabPixels, width: w, height: h };
+    grabTex.needsUpdate = true;
+  }
+});
 
 // ─── Bootstrap ──────────────────────────────────────────────────────────
 loadModels().catch(err => { statusEl.textContent = `Error: ${err.message}`; console.error(err); });
