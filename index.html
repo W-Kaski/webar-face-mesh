@@ -285,39 +285,60 @@ function buildFaceOverlay() {
 }
 
 // ─── MediaPipe Initialization ───────────────────────────────────────────
-function initMediaPipe() {
-  const faceMesh = new FaceMesh({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
-  });
+async function initMediaPipe() {
+  const statusEl = document.querySelector('#loading-overlay p');
 
-  faceMesh.setOptions({
-    maxNumFaces: 1,
-    refineLandmarks: true,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-  });
-
-  faceMesh.onResults(results => {
-    faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
-    if (!faceReady) {
-      faceReady = true;
-      loadingEl.style.display = 'none';
-      console.log('MediaPipe Face Mesh ready');
-    }
-  });
-
-  const cam = new Camera(video, {
-    onFrame: async () => { await faceMesh.send({ image: video }); },
-    width: 640,
-    height: 480,
-  });
-  cam.start().then(() => {
+  try {
+    // 1. Request camera FIRST using native API (this triggers the permission prompt)
+    statusEl.textContent = 'Requesting camera access…\nPlease tap "Allow"';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
     faceCanvasW = video.videoWidth  || 640;
     faceCanvasH = video.videoHeight || 480;
     faceCanvas.width  = faceCanvasW;
     faceCanvas.height = faceCanvasH;
-    console.log(`Video: ${faceCanvasW}x${faceCanvasH}`);
-  });
+    console.log(`Camera: ${faceCanvasW}x${faceCanvasH}`);
+
+    // 2. Init MediaPipe Face Mesh
+    statusEl.textContent = 'Loading Face Mesh model…';
+    const faceMesh = new FaceMesh({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    faceMesh.onResults(results => {
+      faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
+      if (!faceReady) {
+        faceReady = true;
+        loadingEl.style.display = 'none';
+        console.log('Face Mesh ready');
+      }
+    });
+
+    // 3. Send video frames to MediaPipe in a loop
+    async function processFrame() {
+      if (video.readyState >= 2) {
+        await faceMesh.send({ image: video });
+      }
+      requestAnimationFrame(processFrame);
+    }
+    processFrame();
+
+  } catch (err) {
+    console.error('Camera/MediaPipe error:', err);
+    statusEl.textContent =
+      `Error: ${err.name === 'NotAllowedError'
+        ? 'Camera permission denied. Please allow camera access and reload.'
+        : err.message}\n\nRefresh to retry.`;
+  }
 }
 
 // ─── Draw Face Mesh onto Canvas ─────────────────────────────────────────
