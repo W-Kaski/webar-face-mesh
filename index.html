@@ -311,7 +311,7 @@ function onHandResults(results) {
   }
   // Smooth
   for (let h = 0; h < handData.length; h++) {
-    smoothHands[h] = smoothLandmarks(smoothHands[h], handData[h], 0.45);
+    smoothHands[h] = smoothLandmarks(smoothHands[h], handData[h], 0.7);
   }
 }
 
@@ -417,6 +417,17 @@ function updateQuads(time) {
     const rt = lmToNDC(R[tipTop]);  // right top
     const rb = lmToNDC(R[tipBot]);  // right bottom
     const lb = lmToNDC(L[tipBot]);  // left bottom
+
+    // Validate: skip if corners collapse (fingers not spread or not detected)
+    const diag1 = Math.hypot(lt.x - rb.x, lt.y - rb.y);
+    const diag2 = Math.hypot(rt.x - lb.x, rt.y - lb.y);
+    if (diag1 < 0.03 || diag2 < 0.03) {
+      mesh.visible = false;
+      line.visible = false;
+      continue;
+    }
+    mesh.visible = true;
+    line.visible = true;
 
     // Depth from average z
     const avgZ = (L[tipTop].z + R[tipTop].z + L[tipBot].z + R[tipBot].z) / 4;
