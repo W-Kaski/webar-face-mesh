@@ -57,13 +57,12 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 'use strict';
 
 // ─── Config ─────────────────────────────────────────────────────────────
-const QUAD_COUNT = 4;
-const FINGER_TIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky
+const QUAD_COUNT = 3;
+const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky (skip ring)
 const QUAD_COLORS = [
-  [0.96, 0.98, 0.93],
-  [0.98, 0.98, 0.95],
-  [0.96, 0.98, 0.93],
-  [0.98, 0.98, 0.95],
+  [0.96, 0.96, 0.91],  // white  (thumb↔index)
+  [0.04, 0.16, 0.28],  // blue   (index↔middle)
+  [0.96, 0.96, 0.91],  // white  (middle↔pinky)
 ];
 const STRIP_OPACITY = 0.94;
 
@@ -106,208 +105,37 @@ function createTextureLayer() {
 }
 
 const textureLayers = {
-  redTop: createTextureLayer(),
+  whiteTop: createTextureLayer(),
   blueMid: createTextureLayer(),
-  redBottom: createTextureLayer(),
+  whiteBottom: createTextureLayer(),
 };
 
 const quadMaterials = [
-  { layer: textureLayers.redTop, uvOffset: 0.0, uvScale: 1.0, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
-  { layer: textureLayers.blueMid, uvOffset: 0.0, uvScale: 1.0, base: [0.90, 0.95, 0.94], edgeA: [0.04, 0.16, 0.28], edgeB: [0.05, 0.42, 0.18] },
-  { layer: textureLayers.redBottom, uvOffset: 0.5, uvScale: 0.5, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
-  { layer: textureLayers.redBottom, uvOffset: 0.0, uvScale: 0.5, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
+  { layer: textureLayers.whiteTop, uvOffset: 0.0, uvScale: 1.0, base: [0.96, 0.96, 0.91], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
+  { layer: textureLayers.blueMid, uvOffset: 0.0, uvScale: 1.0, base: [0.04, 0.16, 0.28], edgeA: [0.02, 0.10, 0.20], edgeB: [0.06, 0.22, 0.36] },
+  { layer: textureLayers.whiteBottom, uvOffset: 0.0, uvScale: 1.0, base: [0.96, 0.96, 0.91], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
 ];
 
-let faceBounds = null;
-let lastFaceBoundsStr = '';
-let textureClock = 0;
+// --- mask code commented out for now ---
+// function ellipseContains(x, y, cx, cy, rx, ry) {
+//   const dx = (x - cx) / rx;
+//   const dy = (y - cy) / ry;
+//   return dx * dx + dy * dy <= 1;
+// }
+// function handOcclusion(x, y) { ... }
+// function sampleMask(x, y, fallbackShift) { ... }
+// function drawFaceShadow(ctx, color, alpha, offsetX) { ... }
 
-function ellipseContains(x, y, cx, cy, rx, ry) {
-  const dx = (x - cx) / rx;
-  const dy = (y - cy) / ry;
-  return dx * dx + dy * dy <= 1;
-}
-
-function noise2(x, y, seed) {
-  const n = Math.sin(x * 12.9898 + y * 78.233 + seed * 37.719) * 43758.5453;
-  return n - Math.floor(n);
-}
-
-function fillPaper(ctx, tint) {
-  ctx.fillStyle = tint || '#fbfbf2';
-  ctx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
-  ctx.globalAlpha = 0.12;
-  for (let y = 0; y < TEX_SIZE; y += 7) {
-    ctx.fillStyle = y % 14 === 0 ? '#d9dccf' : '#ffffff';
-    ctx.fillRect(0, y, TEX_SIZE, 1);
-  }
-  ctx.globalAlpha = 1;
-}
-
-// Hand-based occlusion: check if a point overlaps with any hand landmark region
-function handOcclusion(x, y) {
-  if (!smoothHands[0] && !smoothHands[1]) return 0;
-  for (const hand of smoothHands) {
-    if (!hand) continue;
-    // Check palm center (landmark 9) + finger tips
-    const checkPts = [hand[0], hand[5], hand[9], hand[13], hand[17], hand[4], hand[8], hand[12], hand[16], hand[20]];
-    for (const pt of checkPts) {
-      const px = pt.x * TEX_SIZE;
-      const py = pt.y * TEX_SIZE;
-      const d = Math.hypot(x - px, y - py);
-      if (d < 45) return Math.max(0, 1 - d / 45);
-    }
-  }
-  return 0;
-}
-
-function sampleMask(x, y, fallbackShift) {
-  const b = faceBounds || { xMin: 0.39, yMin: 0.2, xMax: 0.61, yMax: 0.7 };
-  const cx = ((b.xMin + b.xMax) * 0.5 + (fallbackShift || 0)) * TEX_SIZE;
-  const cy = ((b.yMin + b.yMax) * 0.5) * TEX_SIZE;
-  const rx = Math.max(64, (b.xMax - b.xMin) * TEX_SIZE * 0.65);
-  const ry = Math.max(118, (b.yMax - b.yMin) * TEX_SIZE * 0.78);
-  const inFace = ellipseContains(x, y, cx, cy, rx, ry) ? 0.95
-    : ellipseContains(x, y, cx - rx * 0.2, cy - ry * 0.66, rx * 0.78, ry * 0.25) ? 0.75
-    : 0;
-  if (inFace < 0.1) return 0;
-  const occlusion = handOcclusion(x, y);
-  return inFace * (1 - occlusion * 0.8);
-}
-
-function drawFaceShadow(ctx, color, alpha, offsetX) {
-  if (!faceBounds) return;
-  const b = faceBounds;
-  const cx = ((b.xMin + b.xMax) * 0.5 + (offsetX || 0)) * TEX_SIZE;
-  const cy = ((b.yMin + b.yMax) * 0.5) * TEX_SIZE;
-  const rx = Math.max(58, (b.xMax - b.xMin) * TEX_SIZE * 0.55);
-  const ry = Math.max(92, (b.yMax - b.yMin) * TEX_SIZE * 0.66);
-  ctx.save();
-  ctx.fillStyle = color;
-  ctx.globalAlpha = alpha;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, rx, ry, -0.05, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalCompositeOperation = 'destination-out';
-  ctx.globalAlpha = 0.7;
-  ctx.beginPath();
-  ctx.ellipse(cx + rx * 0.18, cy + ry * 0.04, rx * 0.32, ry * 0.45, 0.05, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawRedHalftone(layer, variant) {
-  const ctx = layer.ctx;
-  fillPaper(ctx, '#fbfbf2');
-
-  ctx.save();
-  ctx.fillStyle = '#bd1730';
-  const step = variant === 'bottom' ? 7 : 8;
-  for (let y = 4; y < TEX_SIZE; y += step) {
-    const noDotRingBand = variant === 'bottom' && Math.abs(y / TEX_SIZE - 0.5) < 0.085;
-    for (let x = 4; x < TEX_SIZE; x += step) {
-      if (noDotRingBand) continue;
-      const shiftedX = x + (variant === 'top' ? -28 : 18);
-      const m = sampleMask(shiftedX, y, variant === 'top' ? -0.08 : 0.1);
-      const diagonal = Math.abs((x - TEX_SIZE * 0.55) - (y - TEX_SIZE * 0.5) * 0.55) < 44;
-      const edgeColumn = variant === 'bottom' && (x > TEX_SIZE * 0.73 || x < TEX_SIZE * 0.18);
-      const active = m > 0.18 || diagonal || edgeColumn;
-      if (!active) continue;
-      const n = noise2(x, y, variant === 'top' ? 3 : 9);
-      const silhouette = Math.max(0, m - 0.12);
-      const r = 1.15 + silhouette * 3.2 + (diagonal ? 1.2 : 0) + n * 0.45;
-      ctx.globalAlpha = Math.min(0.96, 0.28 + silhouette * 0.65 + (diagonal ? 0.28 : 0));
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  ctx.restore();
-
-  ctx.save();
-  ctx.strokeStyle = '#a71d2c';
-  ctx.lineWidth = 2;
-  ctx.globalAlpha = 0.78;
-  ctx.beginPath();
-  ctx.moveTo(variant === 'top' ? -10 : 40, variant === 'top' ? 96 : 430);
-  ctx.bezierCurveTo(160, variant === 'top' ? 70 : 365, 280, variant === 'top' ? 142 : 468, 540, variant === 'top' ? 110 : 380);
-  ctx.stroke();
-  ctx.restore();
-
-  drawFaceShadow(ctx, '#bd1730', variant === 'top' ? 0.22 : 0.18, variant === 'top' ? -0.05 : 0.08);
+function fillSolid(layer, hex) {
+  layer.ctx.fillStyle = hex;
+  layer.ctx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
   layer.texture.needsUpdate = true;
-}
-
-function drawBlueInk(layer) {
-  const ctx = layer.ctx;
-  fillPaper(ctx, '#f6f9f0');
-
-  ctx.save();
-  ctx.fillStyle = '#0b3c5d';
-  ctx.beginPath();
-  ctx.moveTo(-60, TEX_SIZE * 0.92);
-  ctx.lineTo(TEX_SIZE + 60, TEX_SIZE * 0.12);
-  ctx.lineTo(TEX_SIZE + 60, TEX_SIZE * 0.48);
-  ctx.lineTo(-60, TEX_SIZE * 1.05);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = '#0e5374';
-  ctx.beginPath();
-  ctx.moveTo(TEX_SIZE * 0.05, TEX_SIZE * 0.72);
-  ctx.lineTo(TEX_SIZE * 0.74, TEX_SIZE * 0.18);
-  ctx.lineTo(TEX_SIZE * 0.82, TEX_SIZE * 0.31);
-  ctx.lineTo(TEX_SIZE * 0.16, TEX_SIZE * 0.86);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = '#07a234';
-  ctx.globalAlpha = 0.9;
-  ctx.beginPath();
-  ctx.moveTo(TEX_SIZE * 0.66, TEX_SIZE * 0.44);
-  ctx.bezierCurveTo(TEX_SIZE * 0.83, TEX_SIZE * 0.32, TEX_SIZE * 0.88, TEX_SIZE * 0.54, TEX_SIZE * 1.02, TEX_SIZE * 0.48);
-  ctx.lineTo(TEX_SIZE, TEX_SIZE * 0.76);
-  ctx.bezierCurveTo(TEX_SIZE * 0.82, TEX_SIZE * 0.83, TEX_SIZE * 0.72, TEX_SIZE * 0.62, TEX_SIZE * 0.58, TEX_SIZE * 0.73);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.fillStyle = '#f9fbf2';
-  for (let y = 0; y < TEX_SIZE; y += 5) {
-    for (let x = 0; x < TEX_SIZE; x += 5) {
-      const m = sampleMask(x, y, 0);
-      if (m < 0.18) continue;
-      const scrape = noise2(x, y, 17) > 0.34;
-      if (!scrape) continue;
-      ctx.globalAlpha = 0.24 + m * 0.64;
-      ctx.fillRect(x, y, 3 + m * 7, 1 + m * 3);
-    }
-  }
-  ctx.restore();
-
-  drawFaceShadow(ctx, '#f9fbf2', 0.5, 0.03);
-  layer.texture.needsUpdate = true;
-}
-
-function updateFaceBounds() {
-  if (faceLandmarks.length === 0) return;
-  let xMin=1, yMin=1, xMax=0, yMax=0;
-  for (const lm of faceLandmarks) {
-    if (lm.x < xMin) xMin = lm.x;
-    if (lm.x > xMax) xMax = lm.x;
-    if (lm.y < yMin) yMin = lm.y;
-    if (lm.y > yMax) yMax = lm.y;
-  }
-  const pad = 0.03;
-  faceBounds = { xMin: xMin - pad, yMin: yMin - pad, xMax: xMax + pad, yMax: yMax + pad };
 }
 
 function drawMaterialTextures() {
-  textureClock++;
-  drawRedHalftone(textureLayers.redTop, 'top');
-  drawBlueInk(textureLayers.blueMid);
-  drawRedHalftone(textureLayers.redBottom, 'bottom');
+  fillSolid(textureLayers.whiteTop, '#f5f3ec');
+  fillSolid(textureLayers.blueMid, '#0b3c5d');
+  fillSolid(textureLayers.whiteBottom, '#f5f3ec');
   faceTextureReady = true;
 }
 
@@ -319,7 +147,7 @@ const connectionLines = [];
 const quadGroup = new THREE.Group();
 scene.add(quadGroup);
 
-// Create 4 quads
+// Create 3 quads
 for (let i = 0; i < QUAD_COUNT; i++) {
   const geo = new THREE.BufferGeometry();
   // 4 vertices × 3 floats + UVs
@@ -485,12 +313,6 @@ function onHandResults(results) {
 
 function onFaceResults(results) {
   faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
-  updateFaceBounds();
-  const key = faceBounds ? `${(faceBounds.xMin*100)|0},${(faceBounds.yMin*100)|0}` : '';
-  if (key !== lastFaceBoundsStr) {
-    lastFaceBoundsStr = key;
-    drawMaterialTextures();
-  }
 }
 
 // ─── Camera ─────────────────────────────────────────────────────────────
