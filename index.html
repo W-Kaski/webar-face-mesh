@@ -7,45 +7,19 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{overflow:hidden;background:#000;font-family:system-ui}
-#video{
-  position:fixed;top:0;left:0;width:100%;height:100%;
-  object-fit:cover;z-index:0;transform:scaleX(-1);
-}
+#video{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0;transform:scaleX(-1)}
 #three-canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
-#loading{
-  position:fixed;inset:0;z-index:999;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  background:rgba(0,0,0,0.92);color:#fff;gap:16px;
-}
-.spinner{
-  width:44px;height:44px;
-  border:3px solid rgba(255,255,255,0.12);border-top-color:#64ffda;
-  border-radius:50%;animation:spin 0.7s linear infinite;
-}
+#loading{position:fixed;inset:0;z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.92);color:#fff;gap:16px}
+.spinner{width:44px;height:44px;border:3px solid rgba(255,255,255,0.12);border-top-color:#64ffda;border-radius:50%;animation:spin 0.7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #loading p{font-size:13px;color:rgba(255,255,255,0.6);text-align:center;line-height:1.8}
-#btn{
-  margin-top:12px;padding:10px 28px;border:none;border-radius:20px;
-  background:#64ffda;color:#000;font-size:14px;font-weight:600;
-  cursor:pointer;display:none;
-}
-#hud{
-  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:50;
-  background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);color:rgba(255,255,255,0.85);
-  padding:8px 20px;border-radius:20px;font-size:12px;
-  pointer-events:none;opacity:0;transition:opacity 0.5s;
-}
+#btn{margin-top:12px;padding:10px 28px;border:none;border-radius:20px;background:#64ffda;color:#000;font-size:14px;font-weight:600;cursor:pointer;display:none}
+#hud{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:50;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);color:rgba(255,255,255,0.85);padding:8px 20px;border-radius:20px;font-size:12px;pointer-events:none;opacity:0;transition:opacity 0.5s}
 </style>
 </head>
 <body>
-
-<div id="loading">
-  <div class="spinner"></div>
-  <p id="status">Loading models…</p>
-  <button id="btn" onclick="startCamera()">Start Camera</button>
-</div>
+<div id="loading"><div class="spinner"></div><p id="status">Loading models…</p><button id="btn" onclick="startCamera()">Start Camera</button></div>
 <div id="hud">Show both hands to the camera</div>
-
 <video id="video" autoplay playsinline muted></video>
 <canvas id="three-canvas"></canvas>
 
@@ -60,160 +34,119 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 // ─── Config ─────────────────────────────────────────────────────────────
 const QUAD_COUNT = 3;
 const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky (skip ring)
-const QUAD_COLORS = [
-  [0.96, 0.96, 0.91],  // white  (thumb↔index)
-  [0.04, 0.16, 0.28],  // blue   (index↔middle)
-  [0.96, 0.96, 0.91],  // white  (middle↔pinky)
-];
-const STRIP_OPACITY = 0.94;
+const EFFECT_TYPES = ['redOutline', 'whiteSilhouette', 'greenOutline'];
+const TEX_SIZE = 256;
+const SMOOTHING = 0.42;
 
 // ─── State ──────────────────────────────────────────────────────────────
 let handData = [];
 let faceLandmarks = [];
 let smoothHands = [null, null];
-let faceTextureReady = false;
-
-// Person mask (from SelfieSegmentation)
-const personMaskCanvas = document.createElement('canvas');
-personMaskCanvas.width = 256;
-personMaskCanvas.height = 256;
-const personMaskCtx = personMaskCanvas.getContext('2d', { willReadFrequently: true });
-let personMaskData = null;  // Uint8ClampedArray (RGBA)
+let personMaskData = null;
 let segmentationInstance = null;
+let handsInstance = null;
+let faceMeshInstance = null;
 
 // ─── DOM ────────────────────────────────────────────────────────────────
-const videoEl   = document.getElementById('video');
-const canvasEl  = document.getElementById('three-canvas');
+const videoEl = document.getElementById('video');
+const canvasEl = document.getElementById('three-canvas');
 const loadingEl = document.getElementById('loading');
-const statusEl  = document.getElementById('status');
-const btnEl     = document.getElementById('btn');
-const hudEl     = document.getElementById('hud');
+const statusEl = document.getElementById('status');
+const btnEl = document.getElementById('btn');
+const hudEl = document.getElementById('hud');
 
-// ─── Three.js Setup ─────────────────────────────────────────────────────
-const scene  = new THREE.Scene();
+// ─── Three.js ───────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const renderer = new THREE.WebGLRenderer({
-  canvas: canvasEl, alpha: true, antialias: true,
-});
+const renderer = new THREE.WebGLRenderer({ canvas: canvasEl, alpha: true, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
-// ─── Material Textures ─────────────────────────────────────────────────
-const TEX_SIZE = 512;
+// ─── Shared Effect Canvas (video + mask compositing) ────────────────────
+const effectCanvas = document.createElement('canvas');
+effectCanvas.width = TEX_SIZE;
+effectCanvas.height = TEX_SIZE;
+const effectCtx = effectCanvas.getContext('2d', { willReadFrequently: true });
+const effectTexture = new THREE.CanvasTexture(effectCanvas);
+effectTexture.minFilter = THREE.LinearFilter;
+effectTexture.magFilter = THREE.LinearFilter;
 
-function createTextureLayer() {
-  const canvas = document.createElement('canvas');
-  canvas.width = TEX_SIZE;
-  canvas.height = TEX_SIZE;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.minFilter = THREE.LinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-  return { canvas, ctx, texture };
-}
+const maskCanvas = document.createElement('canvas');
+maskCanvas.width = TEX_SIZE;
+maskCanvas.height = TEX_SIZE;
+const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
 
-const textureLayers = {
-  whiteTop: createTextureLayer(),
-  blueMid: createTextureLayer(),
-  whiteBottom: createTextureLayer(),
-};
-
-const quadMaterials = [
-  { layer: textureLayers.whiteTop, uvOffset: 0.0, uvScale: 1.0, base: [0.96, 0.96, 0.91], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
-  { layer: textureLayers.blueMid, uvOffset: 0.0, uvScale: 1.0, base: [0.04, 0.16, 0.28], edgeA: [0.02, 0.10, 0.20], edgeB: [0.06, 0.22, 0.36] },
-  { layer: textureLayers.whiteBottom, uvOffset: 0.0, uvScale: 1.0, base: [0.96, 0.96, 0.91], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
-];
-
-// --- mask code commented out for now ---
-// function ellipseContains(x, y, cx, cy, rx, ry) {
-//   const dx = (x - cx) / rx;
-//   const dy = (y - cy) / ry;
-//   return dx * dx + dy * dy <= 1;
-// }
-// function handOcclusion(x, y) { ... }
-// function sampleMask(x, y, fallbackShift) { ... }
-// function drawFaceShadow(ctx, color, alpha, offsetX) { ... }
-
-// Sample person mask at texture coordinates (0..1)
-function samplePerson(u, v) {
-  if (!personMaskData) return 0;
-  const px = Math.max(0, Math.min(255, Math.floor(u * 256)));
-  const py = Math.max(0, Math.min(255, Math.floor(v * 256)));
-  const i = (py * 256 + px) * 4;
-  return personMaskData[i] / 255; // segmentation mask is grayscale in R channel
-}
-
-// Check if a point is on the edge of the person mask (within radius pixels)
-function isEdge(u, v, radius) {
-  const m = samplePerson(u, v);
-  if (m < 0.3) return false;
-  const du = radius / TEX_SIZE;
-  const dv = radius / TEX_SIZE;
-  return (
-    samplePerson(u - du, v) < 0.3 ||
-    samplePerson(u + du, v) < 0.3 ||
-    samplePerson(u, v - dv) < 0.3 ||
-    samplePerson(u, v + dv) < 0.3
-  );
-}
-
-function drawQuadTexture(layer, baseHex, effectType) {
-  const ctx = layer.ctx;
-  const S = TEX_SIZE;
-
-  // Base fill
-  ctx.fillStyle = baseHex;
-  ctx.fillRect(0, 0, S, S);
+// ─── Texture compositing: video + person mask → effect per quad ─────────
+function updateEffectTexture(effectType) {
+  // Draw mirrored video
+  effectCtx.save();
+  effectCtx.translate(TEX_SIZE, 0);
+  effectCtx.scale(-1, 1);
+  effectCtx.drawImage(videoEl, 0, 0, TEX_SIZE, TEX_SIZE);
+  effectCtx.restore();
 
   if (!personMaskData) {
-    layer.texture.needsUpdate = true;
+    effectTexture.needsUpdate = true;
     return;
   }
 
-  const imgData = ctx.getImageData(0, 0, S, S);
+  const imgData = effectCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE);
   const px = imgData.data;
-
-  const EDGE_RADIUS = 6; // thick outline
+  const EDGE_RADIUS = 6;
+  const S = TEX_SIZE;
 
   for (let y = 0; y < S; y++) {
     const v = y / S;
     for (let x = 0; x < S; x++) {
       const u = x / S;
-      const m = samplePerson(u, v);
-      if (m < 0.2) continue;
+      const mi = (y * S + x) * 4;
+      const m = personMaskData[mi] / 255;
 
-      const i = (y * S + x) * 4;
+      if (m < 0.2) {
+        // Background: make transparent
+        px[mi + 3] = 0;
+        continue;
+      }
 
       if (effectType === 'redOutline') {
-        // Red thick outline on white base
-        if (isEdge(u, v, EDGE_RADIUS)) {
-          px[i] = 185; px[i+1] = 23; px[i+2] = 48; px[i+3] = 230;
+        if (isMaskEdge(u, v, EDGE_RADIUS, S)) {
+          px[mi] = 185; px[mi+1] = 23; px[mi+2] = 48; px[mi+3] = 230;
+        } else {
+          px[mi + 3] = 0; // person interior transparent (show base)
         }
       } else if (effectType === 'whiteSilhouette') {
-        // White silhouette on blue base
-        px[i] = 245; px[i+1] = 243; px[i+2] = 236; px[i+3] = Math.floor(m * 230);
+        // White fill for person area
+        px[mi] = 245; px[mi+1] = 243; px[mi+2] = 236;
+        px[mi+3] = Math.floor(m * 220);
       } else if (effectType === 'greenOutline') {
-        // Green thick outline on white base
-        if (isEdge(u, v, EDGE_RADIUS)) {
-          px[i] = 10; px[i+1] = 162; px[i+2] = 52; px[i+3] = 230;
+        if (isMaskEdge(u, v, EDGE_RADIUS, S)) {
+          px[mi] = 10; px[mi+1] = 162; px[mi+2] = 52; px[mi+3] = 230;
+        } else {
+          px[mi + 3] = 0;
         }
       }
     }
   }
 
-  ctx.putImageData(imgData, 0, 0);
-  layer.texture.needsUpdate = true;
+  effectCtx.putImageData(imgData, 0, 0);
+  effectTexture.needsUpdate = true;
 }
 
-function drawMaterialTextures() {
-  drawQuadTexture(textureLayers.whiteTop, '#f5f3ec', 'redOutline');
-  drawQuadTexture(textureLayers.blueMid, '#0b3c5d', 'whiteSilhouette');
-  drawQuadTexture(textureLayers.whiteBottom, '#f5f3ec', 'greenOutline');
-  faceTextureReady = true;
+function sampleMask(u, v) {
+  if (!personMaskData) return 0;
+  const px = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(u * TEX_SIZE)));
+  const py = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(v * TEX_SIZE)));
+  return personMaskData[(py * TEX_SIZE + px) * 4] / 255;
 }
 
-drawMaterialTextures();
+function isMaskEdge(u, v, radius, S) {
+  if (sampleMask(u, v) < 0.3) return false;
+  const du = radius / S;
+  const dv = radius / S;
+  return sampleMask(u-du,v) < 0.3 || sampleMask(u+du,v) < 0.3 ||
+         sampleMask(u,v-dv) < 0.3 || sampleMask(u,v+dv) < 0.3;
+}
 
 // ─── Quad Geometry ──────────────────────────────────────────────────────
 const quads = [];
@@ -221,38 +154,24 @@ const connectionLines = [];
 const quadGroup = new THREE.Group();
 scene.add(quadGroup);
 
-// Create 3 quads
 for (let i = 0; i < QUAD_COUNT; i++) {
   const geo = new THREE.BufferGeometry();
-  // 4 vertices × 3 floats + UVs
-  const positions = new Float32Array(12);  // 4 corners × 3
-  const uvs = new Float32Array([
-    0, 1,  1, 1,  1, 0,  0, 0   // quad UV mapping
-  ]);
-  const indices = [0, 1, 2,  0, 2, 3]; // two triangles
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geo.setIndex(indices);
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0,1, 1,1, 1,0, 0,0]), 2));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
 
-  const materialPlan = quadMaterials[i];
-  const [r, g, b] = materialPlan.base;
-  const [er1, eg1, eb1] = materialPlan.edgeA;
-  const [er2, eg2, eb2] = materialPlan.edgeB;
+  const baseColor = i === 1 ? [0.04, 0.16, 0.28] : [0.96, 0.96, 0.91];
+
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     side: THREE.DoubleSide,
     uniforms: {
-      uTexture: { value: materialPlan.layer.texture },
-      uColor:   { value: new THREE.Color(r, g, b) },
-      uEdgeA:   { value: new THREE.Color(er1, eg1, eb1) },
-      uEdgeB:   { value: new THREE.Color(er2, eg2, eb2) },
-      uOpacity: { value: STRIP_OPACITY },
-      uGlow:    { value: 0.0 },
-      uTime:    { value: 0.0 },
-      uUvOffset: { value: materialPlan.uvOffset },
-      uUvScale:  { value: materialPlan.uvScale },
+      uTexture: { value: effectTexture },
+      uBaseColor: { value: new THREE.Color(baseColor[0], baseColor[1], baseColor[2]) },
+      uGlow: { value: 0.0 },
+      uTime: { value: 0.0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -263,35 +182,28 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     `,
     fragmentShader: `
       uniform sampler2D uTexture;
-      uniform vec3 uColor;
-      uniform vec3 uEdgeA;
-      uniform vec3 uEdgeB;
-      uniform float uOpacity;
+      uniform vec3 uBaseColor;
       uniform float uGlow;
       uniform float uTime;
-      uniform float uUvOffset;
-      uniform float uUvScale;
       varying vec2 vUv;
 
       void main() {
-        vec2 stripUv = vec2(vUv.x, uUvOffset + vUv.y * uUvScale);
-        vec4 tex = texture2D(uTexture, stripUv);
+        vec4 tex = texture2D(uTexture, vUv);
 
-        vec3 paper = mix(uColor, tex.rgb, 0.92);
-        vec3 col = paper;
+        // Where tex.a > 0: use effect (person area with video + overlay)
+        // Where tex.a == 0: use base color (background or person interior)
+        vec3 col = mix(uBaseColor, tex.rgb, tex.a);
 
+        // Subtle edge glow
         float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-        float edge = 1.0 - smoothstep(0.0, 0.024, edgeDist);
-        col = mix(col, mix(uEdgeA, uEdgeB, step(0.5, vUv.x)), edge * 0.72);
+        float edge = 1.0 - smoothstep(0.0, 0.03, edgeDist);
+        col += vec3(0.5, 0.06, 0.1) * edge * 0.3;
 
-        float crease = smoothstep(0.012, 0.0, abs(vUv.y - 1.0));
-        float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + stripUv.x * 8.0);
-        col += vec3(0.04, 0.12, 0.18) * crease * 0.35;
-        col += vec3(0.0, 0.55, 0.12) * uGlow * 0.12 * pulse;
+        // Glow pulse
+        float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + vUv.x * 8.0);
+        col += vec3(0.0, 0.55, 0.12) * uGlow * 0.1 * pulse;
 
-        float alpha = clamp(uOpacity + edge * 0.04, 0.0, 0.98);
-
-        gl_FragColor = vec4(col, alpha);
+        gl_FragColor = vec4(col, 0.96);
       }
     `,
   });
@@ -301,11 +213,11 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   quadGroup.add(mesh);
   quads.push({ mesh, geo, mat });
 
-  // Connection line (top edge)
   const lineGeo = new THREE.BufferGeometry();
   lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
   const lineMat = new THREE.LineBasicMaterial({
-    color: new THREE.Color(i % 2 ? 0x244a7a : 0xb51a2d), transparent: true, opacity: 0.86,
+    color: new THREE.Color(i === 1 ? 0x0b3c5d : 0xb51a2d),
+    transparent: true, opacity: 0.86,
   });
   const line = new THREE.LineSegments(lineGeo, lineMat);
   line.renderOrder = 5;
@@ -323,75 +235,17 @@ function smoothLandmarks(prev, curr, factor) {
   }));
 }
 
-// ─── MediaPipe: Hands ───────────────────────────────────────────────────
-let handsInstance = null;
-let faceMeshInstance = null;
-let modelsReady = 0;
-
-async function loadModels() {
-  // Hands
-  handsInstance = new Hands({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
-  });
-  handsInstance.setOptions({
-    maxNumHands: 2,
-    modelComplexity: 0,
-    minDetectionConfidence: 0.6,
-    minTrackingConfidence: 0.5,
-  });
-  handsInstance.onResults(onHandResults);
-
-  statusEl.textContent = 'Downloading hand model…';
-  // Warm up with a single frame to trigger model download
-  const dummy = document.createElement('canvas');
-  dummy.width = 64; dummy.height = 48;
-  await handsInstance.send({ image: dummy });
-
-  statusEl.textContent = 'Downloading face model…';
-  faceMeshInstance = new FaceMesh({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
-  });
-  faceMeshInstance.setOptions({
-    maxNumFaces: 1,
-    refineLandmarks: true,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-  });
-  faceMeshInstance.onResults(onFaceResults);
-  await faceMeshInstance.send({ image: dummy });
-
-  // SelfieSegmentation (person mask)
-  segmentationInstance = new SelfieSegmentation({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`,
-  });
-  segmentationInstance.setOptions({ modelSelection: 1 });
-  segmentationInstance.onResults(onSegmentationResults);
-  statusEl.textContent = 'Downloading segmentation model…';
-  await segmentationInstance.send({ image: dummy });
-
-  statusEl.textContent = 'Ready!';
-  btnEl.style.display = 'block';
-}
-
+// ─── MediaPipe callbacks ────────────────────────────────────────────────
 function onHandResults(results) {
   const raw = (results.multiHandLandmarks || []).slice();
-
-  if (raw.length === 0) {
-    handData = [];
-    smoothHands = [null, null];
-    return;
-  }
-
-  if (raw.length === 2) {
-    raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
-  }
-
+  if (raw.length === 0) { handData = []; smoothHands = [null, null]; return; }
+  if (raw.length === 2) raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
   handData = raw;
-  const nextSmooth = [null, null];
+  const next = [null, null];
   for (let h = 0; h < handData.length; h++) {
-    nextSmooth[h] = smoothLandmarks(smoothHands[h], handData[h], 0.42);
+    next[h] = smoothLandmarks(smoothHands[h], handData[h], SMOOTHING);
   }
-  smoothHands = nextSmooth;
+  smoothHands = next;
 }
 
 function onFaceResults(results) {
@@ -400,16 +254,42 @@ function onFaceResults(results) {
 
 function onSegmentationResults(results) {
   if (results.segmentationMask) {
-    personMaskCtx.drawImage(results.segmentationMask, 0, 0, 256, 256);
-    personMaskData = personMaskCtx.getImageData(0, 0, 256, 256).data;
+    maskCtx.drawImage(results.segmentationMask, 0, 0, TEX_SIZE, TEX_SIZE);
+    personMaskData = maskCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
   }
+}
+
+// ─── Load models ────────────────────────────────────────────────────────
+async function loadModels() {
+  const dummy = document.createElement('canvas');
+  dummy.width = 64; dummy.height = 48;
+
+  statusEl.textContent = 'Downloading hand model…';
+  handsInstance = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}` });
+  handsInstance.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+  handsInstance.onResults(onHandResults);
+  await handsInstance.send({ image: dummy });
+
+  statusEl.textContent = 'Downloading face model…';
+  faceMeshInstance = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}` });
+  faceMeshInstance.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+  faceMeshInstance.onResults(onFaceResults);
+  await faceMeshInstance.send({ image: dummy });
+
+  statusEl.textContent = 'Downloading segmentation model…';
+  segmentationInstance = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}` });
+  segmentationInstance.setOptions({ modelSelection: 1 });
+  segmentationInstance.onResults(onSegmentationResults);
+  await segmentationInstance.send({ image: dummy });
+
+  statusEl.textContent = 'Ready!';
+  btnEl.style.display = 'block';
 }
 
 // ─── Camera ─────────────────────────────────────────────────────────────
 async function startCamera() {
   btnEl.style.display = 'none';
   statusEl.textContent = 'Requesting camera…';
-
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -420,76 +300,83 @@ async function startCamera() {
 
     const W = videoEl.videoWidth || 1280;
     const H = videoEl.videoHeight || 720;
-    console.log(`Camera: ${W}×${H}`);
-
-    // Adjust aspect ratio for Three.js
     const aspect = window.innerWidth / window.innerHeight;
     const videoAspect = W / H;
     if (videoAspect > aspect) {
       camera.top = 1; camera.bottom = -1;
-      camera.left = -videoAspect / aspect;
-      camera.right =  videoAspect / aspect;
+      camera.left = -videoAspect / aspect; camera.right = videoAspect / aspect;
     } else {
       camera.left = -1; camera.right = 1;
-      camera.top  = aspect / videoAspect;
-      camera.bottom = -aspect / videoAspect;
+      camera.top = aspect / videoAspect; camera.bottom = -aspect / videoAspect;
     }
     camera.updateProjectionMatrix();
 
-    statusEl.textContent = 'Tracking…';
-
+    // Tracking loop (separate from render)
     let trackFrame = 0;
-    async function loop() {
+    async function track() {
       if (videoEl.readyState >= 2) {
         if (handsInstance) await handsInstance.send({ image: videoEl });
         trackFrame++;
-        if (faceMeshInstance && trackFrame % 3 === 0) {
-          await faceMeshInstance.send({ image: videoEl });
-        }
-        if (segmentationInstance && trackFrame % 5 === 0) {
-          await segmentationInstance.send({ image: videoEl });
-        }
-        if (trackFrame % 5 === 0) drawMaterialTextures();
+        if (faceMeshInstance && trackFrame % 3 === 0) await faceMeshInstance.send({ image: videoEl });
+        if (segmentationInstance && trackFrame % 5 === 0) await segmentationInstance.send({ image: videoEl });
       }
-      requestAnimationFrame(loop);
+      requestAnimationFrame(track);
     }
-    loop();
+    track();
 
-    // Animate
-    let time = 0;
-    function animate() {
-      requestAnimationFrame(animate);
-      time += 0.016;
+    // Render loop
+    const start = performance.now();
+    function render(now) {
+      const time = (now - start) / 1000;
       updateQuads(time);
+      // Update texture with current effect (rotate per frame for perf)
+      if (personMaskData) {
+        updateEffectTexture(EFFECT_TYPES[Math.floor(time * 0.5) % QUAD_COUNT]);
+      }
       renderer.render(scene, camera);
+      requestAnimationFrame(render);
     }
-    animate();
+    requestAnimationFrame(render);
 
     loadingEl.style.display = 'none';
     hudEl.style.opacity = '1';
     setTimeout(() => hudEl.style.opacity = '0', 4000);
-
   } catch (err) {
     statusEl.textContent = `Camera error: ${err.message}`;
-    console.error(err);
+    btnEl.style.display = 'block';
   }
 }
 
-// ─── Update Quads every frame ───────────────────────────────────────────
-const _tmpPos = new Float32Array(12);
+// ─── Update quad positions ──────────────────────────────────────────────
+function lmToNDC(lm) { return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) }; }
+
+const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 };
+const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
+
+function ribbonAnchor(landmarks, tipIdx, handSide) {
+  const tip = landmarks[tipIdx];
+  const mcp = landmarks[FINGER_MCP[tipIdx]];
+  const pip = landmarks[FINGER_PIP[tipIdx]] || mcp;
+  if (!mcp || !pip) return lmToNDC(tip);
+  const towardPalm = tipIdx === 4 ? 0.2 : 0.14;
+  const x = tip.x + (mcp.x - tip.x) * towardPalm;
+  const y = tip.y + (mcp.y - tip.y) * towardPalm;
+  const z = tip.z + (pip.z - tip.z) * 0.25;
+  const ndc = lmToNDC({ x, y, z });
+  const palm = lmToNDC(landmarks[9]);
+  const spread = tipIdx === 4 || tipIdx === 20 ? 0.045 : 0.02;
+  const dx = ndc.x - palm.x;
+  const dy = ndc.y - palm.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: ndc.x + (dx / len) * spread + handSide * 0.006, y: ndc.y + (dy / len) * spread, z };
+}
 
 function updateQuads(time) {
   const hands = smoothHands;
-
-  if (!hands[0] || !hands[1]) {
-    quadGroup.visible = false;
-    return;
-  }
+  if (!hands[0] || !hands[1]) { quadGroup.visible = false; return; }
   quadGroup.visible = true;
 
-  const L = hands[0];
-  const R = hands[1];
-
+  const L = hands[0], R = hands[1];
   const wristGap = Math.abs(lmToNDC(L[0]).x - lmToNDC(R[0]).x);
   const globalGlow = Math.max(0, 1 - wristGap * 1.2);
 
@@ -500,60 +387,34 @@ function updateQuads(time) {
     const { mesh, geo, mat } = quads[i];
     const { line, geo: lineGeo } = connectionLines[i];
 
-    // Corner positions from precomputed arrays (shared edges = no gaps)
-    const lt = Ltips[i];      // left top
-    const rt = Rtips[i];      // right top
-    const rb = Rtips[i + 1];  // right bottom
-    const lb = Ltips[i + 1];  // left bottom
+    const lt = Ltips[i], rt = Rtips[i], rb = Rtips[i+1], lb = Ltips[i+1];
 
+    // Degenerate detection → triangle merge
+    const MERGE_THRESHOLD = 0.045;
     const distLT_RT = Math.hypot(lt.x - rt.x, lt.y - rt.y);
     const distLB_RB = Math.hypot(lb.x - rb.x, lb.y - rb.y);
     const distLT_LB = Math.hypot(lt.x - lb.x, lt.y - lb.y);
     const distRT_RB = Math.hypot(rt.x - rb.x, rt.y - rb.y);
-
-    const MERGE_THRESHOLD = 0.045;
-    const mergeTop  = distLT_RT < MERGE_THRESHOLD;
-    const mergeBot  = distLB_RB < MERGE_THRESHOLD;
+    const mergeTop = distLT_RT < MERGE_THRESHOLD;
+    const mergeBot = distLB_RB < MERGE_THRESHOLD;
     const mergeLeft = distLT_LB < MERGE_THRESHOLD;
-    const mergeRight= distRT_RB < MERGE_THRESHOLD;
-
-    const mergeCount = [mergeTop, mergeBot, mergeLeft, mergeRight].filter(Boolean).length;
-    if (mergeCount >= 3) {
-      mesh.visible = false;
-      line.visible = false;
-      continue;
+    const mergeRight = distRT_RB < MERGE_THRESHOLD;
+    if ([mergeTop, mergeBot, mergeLeft, mergeRight].filter(Boolean).length >= 3) {
+      mesh.visible = false; line.visible = false; continue;
     }
-    mesh.visible = true;
-    line.visible = true;
+    mesh.visible = true; line.visible = true;
 
     let verts;
-    if (mergeTop) {
-      const top = { x: (lt.x+rt.x)/2, y: (lt.y+rt.y)/2 };
-      verts = [top, rb, lb, top];
-    } else if (mergeBot) {
-      const bot = { x: (lb.x+rb.x)/2, y: (lb.y+rb.y)/2 };
-      verts = [lt, rt, bot, bot];
-    } else if (mergeLeft) {
-      const left = { x: (lt.x+lb.x)/2, y: (lt.y+lb.y)/2 };
-      verts = [left, rt, rb, left];
-    } else if (mergeRight) {
-      const right = { x: (rt.x+rb.x)/2, y: (rt.y+rb.y)/2 };
-      verts = [lt, right, right, lb];
-    } else {
-      verts = [lt, rt, rb, lb];
-    }
+    if (mergeTop) { const t = {x:(lt.x+rt.x)/2,y:(lt.y+rt.y)/2}; verts = [t,rb,lb,t]; }
+    else if (mergeBot) { const b = {x:(lb.x+rb.x)/2,y:(lb.y+rb.y)/2}; verts = [lt,rt,b,b]; }
+    else if (mergeLeft) { const l = {x:(lt.x+lb.x)/2,y:(lt.y+lb.y)/2}; verts = [l,rt,rb,l]; }
+    else if (mergeRight) { const r = {x:(rt.x+rb.x)/2,y:(rt.y+rb.y)/2}; verts = [lt,r,r,lb]; }
+    else { verts = [lt, rt, rb, lb]; }
 
     const avgZ = (Ltips[i].z + Rtips[i].z + Ltips[i+1].z + Rtips[i+1].z) / 4 || 0;
     const depth = avgZ * 0.15;
-
-    const positions = geo.attributes.position.array;
-
-    for (let v = 0; v < 4; v++) {
-      positions[v*3] = verts[v].x;
-      positions[v*3+1] = verts[v].y;
-      positions[v*3+2] = depth;
-    }
-
+    const pos = geo.attributes.position.array;
+    for (let v = 0; v < 4; v++) { pos[v*3] = verts[v].x; pos[v*3+1] = verts[v].y; pos[v*3+2] = depth; }
     geo.attributes.position.needsUpdate = true;
     geo.computeVertexNormals();
 
@@ -567,126 +428,14 @@ function updateQuads(time) {
   }
 }
 
-// ─── Landmark → NDC (mirrored selfie) ──────────────────────────────────
-function lmToNDC(lm) {
-  return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) };
-}
-
-// ─── Extend fingertip INWARD toward palm (covers finger body) ───────────
-const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 }; // tip→MCP joint mapping
-const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
-
-function ribbonAnchor(landmarks, tipIdx, handSide) {
-  const tip = landmarks[tipIdx];
-  const mcp = landmarks[FINGER_MCP[tipIdx]];
-  const pip = landmarks[FINGER_PIP[tipIdx]] || mcp;
-  if (!mcp || !pip) return lmToNDC(tip);
-
-  const towardPalm = tipIdx === 4 ? 0.2 : 0.14;
-  const x = tip.x + (mcp.x - tip.x) * towardPalm;
-  const y = tip.y + (mcp.y - tip.y) * towardPalm;
-  const z = tip.z + (pip.z - tip.z) * 0.25;
-
-  const ndc = lmToNDC({ x, y, z });
-  const palm = lmToNDC(landmarks[9]);
-  const spread = tipIdx === 4 || tipIdx === 20 ? 0.045 : 0.02;
-  const dx = ndc.x - palm.x;
-  const dy = ndc.y - palm.y;
-  const len = Math.hypot(dx, dy) || 1;
-
-  return {
-    x: ndc.x + (dx / len) * spread + handSide * 0.006,
-    y: ndc.y + (dy / len) * spread,
-    z,
-  };
-}
-
-function extendedTip(landmarks, tipIdx) {
-  const tip = landmarks[tipIdx];
-  const mcp = landmarks[FINGER_MCP[tipIdx]];
-  if (!mcp) return lmToNDC(tip);
-  // Direction from MCP toward tip, go 30% PAST MCP (inward toward palm)
-  const dx = tip.x - mcp.x;
-  const dy = tip.y - mcp.y;
-  const ext = { x: tip.x - dx * 0.3, y: tip.y - dy * 0.3, z: tip.z };
-  return lmToNDC(ext);
-}
-
 // ─── Resize ─────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// ─── Face Mesh Triangulation (subset) ───────────────────────────────────
-const TRI = [
-  127,34,139,11,0,37,232,231,120,72,37,39,128,121,47,232,121,128,
-  104,69,67,175,171,148,157,158,133,245,128,114,163,7,144,245,236,54,
-  35,226,113,161,160,31,189,105,66,77,76,146,184,78,74,110,47,105,
-  205,187,213,95,48,235,61,166,125,230,161,31,197,195,196,248,189,114,
-  24,141,127,34,139,127,11,0,37,232,231,120,72,37,39,128,121,47,
-  232,121,128,104,69,67,175,171,148,157,158,133,245,128,114,163,7,144,
-  245,236,54,35,226,113,161,160,31,189,105,66,77,76,146,184,78,74,
-  110,47,105,205,187,213,95,48,235,61,166,125,230,161,31,197,195,196,
-  248,189,114,24,141,127,34,139,127,11,0,37,232,231,120,72,37,39,
-  128,121,47,232,121,128,104,69,67,175,171,148,157,158,133,245,128,114,
-  163,7,144,245,236,54,35,226,113,161,160,31,189,105,66,77,76,146,
-  184,78,74,110,47,105,205,187,213,95,48,235,61,166,125,230,161,31,
-  197,195,196,248,189,114,24,141,127,33,246,247,100,101,50,33,7,163,
-  34,227,127,231,120,232,114,17,108,244,189,114,145,22,156,159,40,185,
-  218,115,24,204,2,98,141,5,4,232,121,128,39,37,72,37,0,11,
-  226,113,35,113,226,247,120,231,128,127,34,139,11,0,37,232,231,120,
-  72,37,39,128,121,47,232,121,128,104,69,67,175,171,148,157,158,133,
-  245,128,114,163,7,144,245,236,54,35,226,113,161,160,31,189,105,66,
-  77,76,146,184,78,74,110,47,105,205,187,213,95,48,235,61,166,125,
-  230,161,31,197,195,196,248,189,114,24,141,127,34,139,127,11,0,37,
-  232,231,120,72,37,39,128,121,47,232,121,128,104,69,67,175,171,148,
-  157,158,133,245,128,114,163,7,144,245,236,54,35,226,113,161,160,31,
-  189,105,66,77,76,146,184,78,74,110,47,105,205,187,213,95,48,235,
-  61,166,125,230,161,31,197,195,196,248,189,114,24,141,127,33,246,247,
-  100,101,50,33,7,163,34,227,127,231,120,232,114,17,108,244,189,114,
-  145,22,156,159,40,185,218,115,24,204,2,98,141,5,4,232,121,128,
-  39,37,72,37,0,11,226,113,35,113,226,247,120,231,128,127,34,139,
-  11,0,37,232,231,120,72,37,39,128,121,47,232,121,128,104,69,67,
-  175,171,148,157,158,133,245,128,114,163,7,144,245,236,54,35,226,113,
-  161,160,31,189,105,66,77,76,146,184,78,74,110,47,105,205,187,213,
-  95,48,235,61,166,125,230,161,31,197,195,196,248,189,114,24,141,127,
-  34,139,127,11,0,37,232,231,120,72,37,39,128,121,47,232,121,128,
-  104,69,67,175,171,148,157,158,133,245,128,114,163,7,144,245,236,54,
-  35,226,113,161,160,31,189,105,66,77,76,146,184,78,74,110,47,105,
-  205,187,213,95,48,235,61,166,125,230,161,31,197,195,196,248,189,114,
-  24,141,127,33,246,247,100,101,50,33,7,163,34,227,127,231,120,232,
-  114,17,108,244,189,114,145,22,156,159,40,185,218,115,24,204,2,98,
-  141,5,4,232,121,128,39,37,72,37,0,11,226,113,35,113,226,247,
-  120,231,128,127,34,139,11,0,37,232,231,120,72,37,39,128,121,47,
-  232,121,128,104,69,67,175,171,148,157,158,133,245,128,114,163,7,144,
-  245,236,54,35,226,113,161,160,31,189,105,66,77,76,146,184,78,74,
-  110,47,105,205,187,213,95,48,235,61,166,125,230,161,31,197,195,196,
-  248,189,114,24,141,127,34,139,127,11,0,37,232,231,120,72,37,39,
-  128,121,47,232,121,128,104,69,67,175,171,148,157,158,133,245,128,114,
-  163,7,144,245,236,54,35,226,113,161,160,31,189,105,66,77,76,146,
-  184,78,74,110,47,105,205,187,213,95,48,235,61,166,125,230,161,31,
-  197,195,196,248,189,114,24,141,127,
-  126,127,34,34,139,127,127,227,34,34,227,234,234,227,120,120,231,232,
-  121,232,128,128,245,114,114,244,189,189,248,195,195,197,196,196,3,197,
-  3,196,142,142,196,156,156,22,145,22,145,70,70,63,66,66,63,105,
-  105,107,66,66,107,189,189,107,108,108,107,9,9,107,10,10,107,151,
-  33,7,163,163,7,144,163,246,33,33,246,247,247,246,33,33,247,100,
-  100,247,101,101,247,117,117,247,226,226,247,113,113,247,246,246,113,33,
-  33,113,7,1,2,19,19,2,94,94,2,204,204,2,98,98,2,326,
-  0,11,12,12,11,13,13,11,14,14,11,15,15,11,16,16,11,17,
-  17,11,18,18,11,200,200,11,199,199,11,175,200,199,175,175,199,171,
-  171,199,148,148,199,176,176,199,175,148,176,149,149,176,150,150,176,152,
-  152,176,171,171,176,148,116,117,118,118,117,119,119,117,120,120,117,121,
-  121,117,128,128,117,245,10,338,337,337,338,336,336,338,335,335,338,334,
-  334,338,333,333,338,332,332,338,331,331,338,330,330,338,298,298,338,301,
-  46,53,63,63,53,105,105,53,66,66,53,107,107,53,108,108,53,9,
-  9,53,10,10,53,151,263,255,339,339,255,340,340,255,341,341,255,342,
-  342,255,254,254,255,253,253,255,252,252,255,256,
-];
-
 // ─── Bootstrap ──────────────────────────────────────────────────────────
 loadModels().catch(err => {
-  statusEl.textContent = `Error: ${err.message}\nCheck network and reload.`;
+  statusEl.textContent = `Error: ${err.message}`;
   console.error(err);
 });
 </script>
