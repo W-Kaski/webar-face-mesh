@@ -32,7 +32,7 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const QUAD_COUNT = 3;
-const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky
+const FINGER_TIPS = [4, 8, 12, 20];
 const SMOOTHING = 0.42;
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -59,10 +59,9 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
-// ─── Dummy textures (prevent shader errors before real textures arrive) ──
+// ─── Dummy textures ─────────────────────────────────────────────────────
 const DUMMY_TEX = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
 DUMMY_TEX.needsUpdate = true;
-
 const DUMMY_MASK = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
 DUMMY_MASK.needsUpdate = true;
 
@@ -75,22 +74,27 @@ const VERT = `
   }
 `;
 
+// Shader samples video and mask at the screen-space region the quad covers,
+// NOT the full texture. This makes the quad act as a "window" into the camera feed.
 const FRAG = `
   precision mediump float;
   uniform sampler2D uVideo;
   uniform sampler2D uMask;
+  uniform vec4 uBounds; // (minU, minV, maxU, maxV) screen-space UV of this quad
   uniform float uEffectType;
   uniform vec3 uBaseColor;
   uniform vec3 uEdgeColor;
-  uniform float uTime;
   uniform float uHasMask;
   varying vec2 vUv;
 
   void main() {
-    vec2 uv = vec2(1.0 - vUv.x, vUv.y);
-    float m = texture2D(uMask, uv).r;
+    // Map quad-local UV to screen-space UV (the region this quad covers on screen)
+    vec2 screenUv = mix(uBounds.xy, uBounds.zw, vUv);
 
-    // No mask yet → solid base color
+    // Sample video and mask at the covered region
+    float m = texture2D(uMask, screenUv).r;
+
+    // Background or no mask → base color
     if (uHasMask < 0.5 || m < 0.2) {
       gl_FragColor = vec4(uBaseColor, 0.96);
       return;
@@ -99,12 +103,12 @@ const FRAG = `
     vec3 col = uBaseColor;
     float alpha = 0.96;
 
-    // Edge detection (4-neighbor sampling)
-    float e = 0.008;
-    float mR = texture2D(uMask, uv + vec2(e, 0.0)).r;
-    float mL = texture2D(uMask, uv - vec2(e, 0.0)).r;
-    float mU = texture2D(uMask, uv + vec2(0.0, e)).r;
-    float mD = texture2D(uMask, uv - vec2(0.0, e)).r;
+    // Edge detection in screen-space (offset proportional to quad size)
+    float e = 0.006;
+    float mR = texture2D(uMask, screenUv + vec2(e, 0.0)).r;
+    float mL = texture2D(uMask, screenUv - vec2(e, 0.0)).r;
+    float mU = texture2D(uMask, screenUv + vec2(0.0, e)).r;
+    float mD = texture2D(uMask, screenUv - vec2(0.0, e)).r;
     float edge = max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
 
     if (uEffectType < 0.5) {
@@ -132,7 +136,7 @@ const EFFECTS = [
 
 // ─── Build quads ────────────────────────────────────────────────────────
 const quads = [];
-const lines = [];
+const lineObjs = [];
 const quadGroup = new THREE.Group();
 scene.add(quadGroup);
 
@@ -150,13 +154,13 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     depthWrite: false,
     side: THREE.DoubleSide,
     uniforms: {
-      uVideo:     { value: DUMMY_TEX },
-      uMask:      { value: DUMMY_MASK },
-      uEffectType:{ value: eff.type },
-      uBaseColor: { value: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]) },
-      uEdgeColor: { value: new THREE.Color(eff.edge[0], eff.edge[1], eff.edge[2]) },
-      uTime:      { value: 0 },
-      uHasMask:   { value: 0 },
+      uVideo:      { value: DUMMY_TEX },
+      uMask:       { value: DUMMY_MASK },
+      uBounds:     { value: new THREE.Vector4(0, 0, 1, 1) },
+      uEffectType: { value: eff.type },
+      uBaseColor:  { value: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]) },
+      uEdgeColor:  { value: new THREE.Color(eff.edge[0], eff.edge[1], eff.edge[2]) },
+      uHasMask:    { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,
@@ -177,7 +181,7 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   quadGroup.add(line);
 
   quads.push({ mesh, geo, mat });
-  lines.push({ line, geo: lineGeo });
+  lineObjs.push({ line, geo: lineGeo });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -210,6 +214,11 @@ function ribbonAnchor(landmarks, tipIdx, handSide) {
   const dx = ndc.x - palm.x, dy = ndc.y - palm.y;
   const len = Math.hypot(dx, dy) || 1;
   return { x: ndc.x + (dx / len) * spread + handSide * 0.006, y: ndc.y + (dy / len) * spread, z };
+}
+
+// NDC [-1,1] → screen UV [0,1] (matching mirrored video layout)
+function ndcToScreenUv(ndc) {
+  return { u: 0.5 - ndc.x * 0.5, v: 0.5 - ndc.y * 0.5 };
 }
 
 // ─── MediaPipe callbacks ────────────────────────────────────────────────
@@ -274,10 +283,8 @@ async function startCamera() {
     videoTexture.magFilter = THREE.LinearFilter;
     videoTexture.generateMipmaps = false;
 
-    // Set video texture on all quads
     for (const q of quads) q.mat.uniforms.uVideo.value = videoTexture;
 
-    // Aspect ratio
     const W = videoEl.videoWidth || 1280;
     const H = videoEl.videoHeight || 720;
     const aspect = window.innerWidth / window.innerHeight;
@@ -286,7 +293,7 @@ async function startCamera() {
     else { camera.left = -1; camera.right = 1; camera.top = aspect/va; camera.bottom = -aspect/va; }
     camera.updateProjectionMatrix();
 
-    // Tracking loop (separate from render)
+    // Tracking loop
     let frame = 0;
     async function track() {
       if (videoEl.readyState >= 2) {
@@ -299,18 +306,13 @@ async function startCamera() {
     track();
 
     // Render loop
-    const t0 = performance.now();
-    function render(now) {
-      const time = (now - t0) / 1000;
+    function render() {
       const currentMask = maskTexture || DUMMY_MASK;
-
       for (const q of quads) {
         q.mat.uniforms.uMask.value = currentMask;
         q.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
-        q.mat.uniforms.uTime.value = time;
       }
-
-      updateQuads(time);
+      updateQuads();
       renderer.render(scene, camera);
       requestAnimationFrame(render);
     }
@@ -325,8 +327,8 @@ async function startCamera() {
   }
 }
 
-// ─── Update quad positions ──────────────────────────────────────────────
-function updateQuads(time) {
+// ─── Update quad positions + screen-space bounds ────────────────────────
+function updateQuads() {
   const hands = smoothHands;
   if (!hands[0] || !hands[1]) { quadGroup.visible = false; return; }
   quadGroup.visible = true;
@@ -336,8 +338,8 @@ function updateQuads(time) {
   const Rtips = FINGER_TIPS.map(idx => ribbonAnchor(R, idx, 1));
 
   for (let i = 0; i < QUAD_COUNT; i++) {
-    const { mesh, geo } = quads[i];
-    const { line, geo: lineGeo } = lines[i];
+    const { mesh, geo, mat } = quads[i];
+    const { line, geo: lineGeo } = lineObjs[i];
     const lt = Ltips[i], rt = Rtips[i], rb = Rtips[i+1], lb = Ltips[i+1];
 
     // Degenerate → triangle merge
@@ -362,6 +364,15 @@ function updateQuads(time) {
     const pos = geo.attributes.position.array;
     for (let j = 0; j < 4; j++) { pos[j*3]=v[j].x; pos[j*3+1]=v[j].y; pos[j*3+2]=depth; }
     geo.attributes.position.needsUpdate = true;
+
+    // Compute screen-space UV bounds for this quad
+    // v[0]=lt corresponds to UV (0,1), v[1]=rt to (1,1), v[2]=rb to (1,0), v[3]=lb to (0,0)
+    const uv0 = ndcToScreenUv(v[0]); // top-left
+    const uv2 = ndcToScreenUv(v[2]); // bottom-right
+    mat.uniforms.uBounds.value.set(
+      Math.min(uv0.u, uv2.u), Math.min(uv0.v, uv2.v),
+      Math.max(uv0.u, uv2.u), Math.max(uv0.v, uv2.v)
+    );
 
     const lp = lineGeo.attributes.position.array;
     lp[0]=v[0].x; lp[1]=v[0].y; lp[2]=depth+0.001;
