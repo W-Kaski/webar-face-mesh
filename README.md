@@ -1,93 +1,75 @@
-# WebAR Face Mesh
+# Hand Quad AR
 
-实时 AR 人脸网格追踪 + 标记图叠加效果。
+实时双手追踪 + 手指间透视四边形 + 人脸 Mesh 纹理叠加。
 
-**效果**：打印标记图 → 摄像头识别 → 人脸 Mesh 实时渲染在标记图上 → 移动/翻转标记图，特效跟随变化。
+## 效果
+
+双手伸开手指 → 相邻手指间出现透视菱形（四边形），每个菱形内叠加人脸 Mesh 纹理。手指弯曲/靠近时四边形自动变为三角形。只有一只手时隐藏所有四边形。
+
+```
+左手                                              右手
+  👆thumb══════════════════════════════thumb👆
+    ║        蓝色四边形 (thumb↔index)     ║
+  👆index══════════════════════════════index👆
+    ║        绿色四边形 (index↔middle)    ║
+  👆middle══════════════════════════════middle👆
+    ║        红色四边形 (middle↔ring)     ║
+  👆ring════════════════════════════════ring👆
+    ║        红色四边形 (ring↔pinky)      ║
+  👆pinky═══════════════════════════════pinky👆
+```
 
 ## 技术栈
 
 | 组件 | 作用 |
 |---|---|
-| [AR.js](https://github.com/AR-js-org/AR.js) | ArUco / Hiro 标记图实时追踪，获取 3D 位姿 |
-| [MediaPipe Face Mesh](https://google.github.io/mediapipe/solutions/face_mesh.html) | 468 点人脸 Mesh 实时检测 |
-| [Three.js](https://threejs.org/) | 3D 渲染，将 Mesh 投影到标记图坐标系 |
-| [A-Frame](https://aframe.io/) | WebXR 场景管理，简化 AR.js 集成 |
+| [MediaPipe Hands](https://google.github.io/mediapipe/solutions/hands.html) | 双手 21 点实时追踪 |
+| [MediaPipe Face Mesh](https://google.github.io/mediapipe/solutions/face_mesh.html) | 468 点人脸 Mesh 检测，生成纹理 |
+| [Three.js](https://threejs.org/) | 3D 渲染，四边形/三角形几何 + 自定义 Shader |
 
-## 快速开始
+## 交互
 
-### 1. 启动本地服务器（必须，摄像头需要 localhost 或 HTTPS）
+- 手指伸展 → 四边形放大；手指弯曲 → 四边形缩小
+- 双手靠近 → 辉光增强 + 颜色色相偏移
+- 手指太近（退化） → 四边形自动变为三角形
+- 单手 → 所有四边形隐藏
+- 边缘有脉冲呼吸光效
+
+## 本地运行
+
+摄像头需要 `localhost` 或 HTTPS。
 
 ```bash
-# Python 3
 cd /home/EK/projects/webar-face-mesh
 python3 -m http.server 8080
-
-# 或 Node.js
-npx serve -l 8080
 ```
 
-### 2. 打开浏览器
+打开 http://localhost:8080 ，用 Chrome 效果最佳。
+
+## 线上地址
 
 ```
-http://localhost:8080
+https://w-kaski.github.io/webar-face-mesh/
 ```
-
-用 **Chrome**（桌面或 Android）效果最佳。Safari 部分功能可能受限。
-
-### 3. 允许摄像头访问
-
-浏览器会弹出权限请求，点击「允许」。
-
-### 4. 打印或显示标记图
-
-使用 **Hiro 标记图**（AR.js 内置）：
-
-打印这张图，或者在另一个屏幕上显示：
-![Hiro Marker](https://ar-js-org.github.io/AR.js/data/images/hiro.png)
-
-> 直接用手机/平板打开这个链接显示标记图也行：https://ar-js-org.github.io/AR.js/data/images/hiro.png
-
-### 5. 玩起来
-
-1. 将摄像头对准标记图
-2. 人脸 Mesh 会以 `#64ffda` 色（青色）叠加到标记图上
-3. 移动、翻转、旋转标记图 → Mesh 实时跟随
 
 ## 文件结构
 
 ```
 webar-face-mesh/
-├── index.html    ← 单文件，所有逻辑内联（CDN 加载依赖）
+├── index.html    ← 单文件，CDN 加载依赖，无需构建
 └── README.md
 ```
-
-## 自定义
-
-在 `index.html` 顶部修改常量：
-
-```javascript
-const FACE_COLOR   = [100, 255, 218];  // 人脸 Mesh 颜色 (RGB)
-const FACE_OPACITY = 0.7;              // 纹理透明度
-const POINT_SIZE   = 0.018;            // 3D 点大小
-```
-
-## 部署到线上
-
-因为使用摄像头，**必须 HTTPS**。推荐：
-
-- **GitHub Pages**：推送到 GitHub → Settings → Pages → Deploy
-- **Vercel**：`vercel deploy` 直接上线
-- **Netlify**：拖拽文件夹到 netlify.com
 
 ## 原理
 
 ```
 摄像头画面
-  ├─ AR.js 检测标记图 → markerRoot.matrixWorld（4×4 位姿矩阵）
-  ├─ MediaPipe 检测人脸 → 468 个归一化 2D 坐标
-  └─ 坐标转换：
-       NDC → unproject → camera space → world space → marker local space
-     渲染：
-       face plane (纹理) + point cloud (顶点) → 作为 markerRoot 的子对象
-     结果：所有效果随标记图移动/旋转
+  ├─ MediaPipe Hands → 双手各 21 个 landmark（归一化坐标）
+  ├─ MediaPipe Face Mesh → 468 个人脸 landmark → 绘制到 Canvas 纹理
+  └─ Three.js 渲染：
+       1. 将指尖 landmark 转换为 NDC 坐标（镜像翻转）
+       2. 沿手指方向向内延伸 30%（覆盖手指主体）
+       3. 预计算所有指尖位置（相邻四边形共享边 = 无缝拼接）
+       4. 检测退化：对角线 < 阈值 → 合并顶点为三角形
+       5. 人脸 Mesh 纹理贴到每个四边形上，Shader 添加辉光 + 边缘脉冲
 ```
