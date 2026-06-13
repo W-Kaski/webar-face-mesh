@@ -51,9 +51,7 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/selfie_segmentation.js"></script>
 
 <script>
 'use strict';
@@ -120,12 +118,8 @@ const quadMaterials = [
   { layer: textureLayers.redBottom, uvOffset: 0.0, uvScale: 0.5, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
 ];
 
-const personMaskCanvas = document.createElement('canvas');
-personMaskCanvas.width = TEX_SIZE;
-personMaskCanvas.height = TEX_SIZE;
-const personMaskCtx = personMaskCanvas.getContext('2d', { willReadFrequently: true });
-let hasPersonMask = false;
 let faceBounds = null;
+let lastFaceBoundsStr = '';
 let textureClock = 0;
 
 function ellipseContains(x, y, cx, cy, rx, ry) {
@@ -150,27 +144,35 @@ function fillPaper(ctx, tint) {
   ctx.globalAlpha = 1;
 }
 
-function getMaskData() {
-  if (!hasPersonMask) return null;
-  return personMaskCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
+// Hand-based occlusion: check if a point overlaps with any hand landmark region
+function handOcclusion(x, y) {
+  if (!smoothHands[0] && !smoothHands[1]) return 0;
+  for (const hand of smoothHands) {
+    if (!hand) continue;
+    // Check palm center (landmark 9) + finger tips
+    const checkPts = [hand[0], hand[5], hand[9], hand[13], hand[17], hand[4], hand[8], hand[12], hand[16], hand[20]];
+    for (const pt of checkPts) {
+      const px = pt.x * TEX_SIZE;
+      const py = pt.y * TEX_SIZE;
+      const d = Math.hypot(x - px, y - py);
+      if (d < 45) return Math.max(0, 1 - d / 45);
+    }
+  }
+  return 0;
 }
 
-function sampleMask(maskData, x, y, fallbackShift) {
-  if (maskData) {
-    const px = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(x)));
-    const py = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(y)));
-    const i = (py * TEX_SIZE + px) * 4;
-    return Math.max(maskData[i], maskData[i + 3]) / 255;
-  }
-
+function sampleMask(x, y, fallbackShift) {
   const b = faceBounds || { xMin: 0.39, yMin: 0.2, xMax: 0.61, yMax: 0.7 };
   const cx = ((b.xMin + b.xMax) * 0.5 + (fallbackShift || 0)) * TEX_SIZE;
   const cy = ((b.yMin + b.yMax) * 0.5) * TEX_SIZE;
   const rx = Math.max(64, (b.xMax - b.xMin) * TEX_SIZE * 0.65);
   const ry = Math.max(118, (b.yMax - b.yMin) * TEX_SIZE * 0.78);
-  if (ellipseContains(x, y, cx, cy, rx, ry)) return 0.95;
-  if (ellipseContains(x, y, cx - rx * 0.2, cy - ry * 0.66, rx * 0.78, ry * 0.25)) return 0.75;
-  return 0;
+  const inFace = ellipseContains(x, y, cx, cy, rx, ry) ? 0.95
+    : ellipseContains(x, y, cx - rx * 0.2, cy - ry * 0.66, rx * 0.78, ry * 0.25) ? 0.75
+    : 0;
+  if (inFace < 0.1) return 0;
+  const occlusion = handOcclusion(x, y);
+  return inFace * (1 - occlusion * 0.8);
 }
 
 function drawFaceShadow(ctx, color, alpha, offsetX) {
@@ -196,7 +198,6 @@ function drawFaceShadow(ctx, color, alpha, offsetX) {
 
 function drawRedHalftone(layer, variant) {
   const ctx = layer.ctx;
-  const maskData = getMaskData();
   fillPaper(ctx, '#fbfbf2');
 
   ctx.save();
@@ -207,7 +208,7 @@ function drawRedHalftone(layer, variant) {
     for (let x = 4; x < TEX_SIZE; x += step) {
       if (noDotRingBand) continue;
       const shiftedX = x + (variant === 'top' ? -28 : 18);
-      const m = sampleMask(maskData, shiftedX, y, variant === 'top' ? -0.08 : 0.1);
+      const m = sampleMask(shiftedX, y, variant === 'top' ? -0.08 : 0.1);
       const diagonal = Math.abs((x - TEX_SIZE * 0.55) - (y - TEX_SIZE * 0.5) * 0.55) < 44;
       const edgeColumn = variant === 'bottom' && (x > TEX_SIZE * 0.73 || x < TEX_SIZE * 0.18);
       const active = m > 0.18 || diagonal || edgeColumn;
@@ -239,7 +240,6 @@ function drawRedHalftone(layer, variant) {
 
 function drawBlueInk(layer) {
   const ctx = layer.ctx;
-  const maskData = getMaskData();
   fillPaper(ctx, '#f6f9f0');
 
   ctx.save();
@@ -276,7 +276,7 @@ function drawBlueInk(layer) {
   ctx.fillStyle = '#f9fbf2';
   for (let y = 0; y < TEX_SIZE; y += 5) {
     for (let x = 0; x < TEX_SIZE; x += 5) {
-      const m = sampleMask(maskData, x, y, 0);
+      const m = sampleMask(x, y, 0);
       if (m < 0.18) continue;
       const scrape = noise2(x, y, 17) > 0.34;
       if (!scrape) continue;
@@ -424,7 +424,6 @@ function smoothLandmarks(prev, curr, factor) {
 // ─── MediaPipe: Hands ───────────────────────────────────────────────────
 let handsInstance = null;
 let faceMeshInstance = null;
-let segmentationInstance = null;
 let modelsReady = 0;
 
 async function loadModels() {
@@ -434,7 +433,7 @@ async function loadModels() {
   });
   handsInstance.setOptions({
     maxNumHands: 2,
-    modelComplexity: 1,
+    modelComplexity: 0,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.5,
   });
@@ -458,17 +457,6 @@ async function loadModels() {
   });
   faceMeshInstance.onResults(onFaceResults);
   await faceMeshInstance.send({ image: dummy });
-
-  statusEl.textContent = 'Downloading silhouette model…';
-  segmentationInstance = new SelfieSegmentation({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`,
-  });
-  segmentationInstance.setOptions({
-    modelSelection: 1,
-    selfieMode: true,
-  });
-  segmentationInstance.onResults(onSegmentationResults);
-  await segmentationInstance.send({ image: dummy });
 
   statusEl.textContent = 'Ready!';
   btnEl.style.display = 'block';
@@ -498,18 +486,11 @@ function onHandResults(results) {
 function onFaceResults(results) {
   faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
   updateFaceBounds();
-  drawMaterialTextures();
-}
-
-function onSegmentationResults(results) {
-  personMaskCtx.clearRect(0, 0, TEX_SIZE, TEX_SIZE);
-  if (results.segmentationMask) {
-    personMaskCtx.drawImage(results.segmentationMask, 0, 0, TEX_SIZE, TEX_SIZE);
-    hasPersonMask = true;
-  } else {
-    hasPersonMask = false;
+  const key = faceBounds ? `${(faceBounds.xMin*100)|0},${(faceBounds.yMin*100)|0}` : '';
+  if (key !== lastFaceBoundsStr) {
+    lastFaceBoundsStr = key;
+    drawMaterialTextures();
   }
-  drawMaterialTextures();
 }
 
 // ─── Camera ─────────────────────────────────────────────────────────────
@@ -545,11 +526,14 @@ async function startCamera() {
 
     statusEl.textContent = 'Tracking…';
 
+    let trackFrame = 0;
     async function loop() {
       if (videoEl.readyState >= 2) {
-        if (handsInstance)       await handsInstance.send({ image: videoEl });
-        if (faceMeshInstance)    await faceMeshInstance.send({ image: videoEl });
-        if (segmentationInstance) await segmentationInstance.send({ image: videoEl });
+        if (handsInstance) await handsInstance.send({ image: videoEl });
+        trackFrame++;
+        if (faceMeshInstance && trackFrame % 3 === 0) {
+          await faceMeshInstance.send({ image: videoEl });
+        }
       }
       requestAnimationFrame(loop);
     }
