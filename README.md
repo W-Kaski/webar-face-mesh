@@ -43,9 +43,9 @@ http://localhost:8080
 使用 **Hiro 标记图**（AR.js 内置）：
 
 打印这张图，或者在另一个屏幕上显示：
-![Hiro Marker](https://raw.githubusercontent.com/AR-js-org/AR.js/master/aframe/examples/marker-training/examples/pattern-files/hiro.png)
+![Hiro Marker](https://ar-js-org.github.io/AR.js/data/images/hiro.png)
 
-> 直接用手机/平板打开这个链接显示标记图也行：https://github.com/AR-js-org/AR.js/raw/master/aframe/examples/marker-training/examples/pattern-files/hiro.png
+> 直接用手机/平板打开这个链接显示标记图也行：https://ar-js-org.github.io/AR.js/data/images/hiro.png
 
 ### 5. 玩起来
 
