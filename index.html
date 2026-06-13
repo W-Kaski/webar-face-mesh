@@ -25,7 +25,6 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/selfie_segmentation.js"></script>
 
 <script>
@@ -33,14 +32,13 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 
 // ─── Config ─────────────────────────────────────────────────────────────
 const QUAD_COUNT = 3;
-const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky (skip ring)
+const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky
 const SMOOTHING = 0.42;
 
 // ─── State ──────────────────────────────────────────────────────────────
 let smoothHands = [null, null];
-let segmentationInstance = null;
 let handsInstance = null;
-let faceMeshInstance = null;
+let segmentationInstance = null;
 let videoTexture = null;
 let maskTexture = null;
 let hasMask = false;
@@ -61,20 +59,23 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
-// ─── Quad Geometry ──────────────────────────────────────────────────────
-const quads = [];
-const connectionLines = [];
-const quadGroup = new THREE.Group();
-scene.add(quadGroup);
+// ─── Dummy textures (prevent shader errors before real textures arrive) ──
+const DUMMY_TEX = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
+DUMMY_TEX.needsUpdate = true;
 
-// Effect config per quad: [effectType, baseColor, edgeColor]
-const EFFECTS = [
-  { type: 0, base: [0.96, 0.96, 0.91], edge: [0.72, 0.05, 0.13] },  // red outline on white
-  { type: 1, base: [0.04, 0.16, 0.28], edge: [0.96, 0.96, 0.91] },  // white silhouette on blue
-  { type: 2, base: [0.96, 0.96, 0.91], edge: [0.10, 0.55, 0.18] },  // green outline on white
-];
+const DUMMY_MASK = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
+DUMMY_MASK.needsUpdate = true;
 
-const FRAG_SHADER = `
+// ─── Shader ─────────────────────────────────────────────────────────────
+const VERT = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const FRAG = `
   precision mediump float;
   uniform sampler2D uVideo;
   uniform sampler2D uMask;
@@ -87,102 +88,83 @@ const FRAG_SHADER = `
 
   void main() {
     vec2 uv = vec2(1.0 - vUv.x, vUv.y);
-    vec4 video = texture2D(uVideo, uv);
     float m = texture2D(uMask, uv).r;
 
+    // No mask yet → solid base color
     if (uHasMask < 0.5 || m < 0.2) {
       gl_FragColor = vec4(uBaseColor, 0.96);
       return;
     }
 
-    vec3 col;
+    vec3 col = uBaseColor;
     float alpha = 0.96;
+
+    // Edge detection (4-neighbor sampling)
+    float e = 0.008;
+    float mR = texture2D(uMask, uv + vec2(e, 0.0)).r;
+    float mL = texture2D(uMask, uv - vec2(e, 0.0)).r;
+    float mU = texture2D(uMask, uv + vec2(0.0, e)).r;
+    float mD = texture2D(uMask, uv - vec2(0.0, e)).r;
+    float edge = max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
 
     if (uEffectType < 0.5) {
       // Red outline
-      float e = 0.008;
-      float mR = texture2D(uMask, uv + vec2(e, 0.0)).r;
-      float mL = texture2D(uMask, uv - vec2(e, 0.0)).r;
-      float mU = texture2D(uMask, uv + vec2(0.0, e)).r;
-      float mD = texture2D(uMask, uv - vec2(0.0, e)).r;
-      float edge = max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
       if (edge > 0.08) { col = uEdgeColor; alpha = 0.95; }
-      else { gl_FragColor = vec4(uBaseColor, 0.96); return; }
     } else if (uEffectType < 1.5) {
       // White silhouette
       col = uEdgeColor;
       alpha = m * 0.9;
     } else {
       // Green outline
-      float e = 0.008;
-      float mR = texture2D(uMask, uv + vec2(e, 0.0)).r;
-      float mL = texture2D(uMask, uv - vec2(e, 0.0)).r;
-      float mU = texture2D(uMask, uv + vec2(0.0, e)).r;
-      float mD = texture2D(uMask, uv - vec2(0.0, e)).r;
-      float edge = max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
       if (edge > 0.08) { col = uEdgeColor; alpha = 0.95; }
-      else { gl_FragColor = vec4(uBaseColor, 0.96); return; }
     }
 
     gl_FragColor = vec4(col, alpha);
   }
 `;
 
-const VERT_SHADER = `
-  varying vec2 vUv;
-  void main() {
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
+// ─── Effect definitions ─────────────────────────────────────────────────
+const EFFECTS = [
+  { type: 0, base: [0.96, 0.96, 0.91], edge: [0.72, 0.05, 0.13] },
+  { type: 1, base: [0.04, 0.16, 0.28], edge: [0.96, 0.96, 0.91] },
+  { type: 2, base: [0.96, 0.96, 0.91], edge: [0.10, 0.55, 0.18] },
+];
+
+// ─── Build quads ────────────────────────────────────────────────────────
+const quads = [];
+const lines = [];
+const quadGroup = new THREE.Group();
+scene.add(quadGroup);
 
 for (let i = 0; i < QUAD_COUNT; i++) {
+  const eff = EFFECTS[i];
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0,1, 1,1, 1,0, 0,0]), 2));
   geo.setIndex([0, 1, 2, 0, 2, 3]);
 
-  const eff = EFFECTS[i];
-
-  // Fallback material (always works, shows colored quad)
-  const fallbackMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]),
+  const mat = new THREE.ShaderMaterial({
     transparent: true,
-    opacity: 0.94,
-    side: THREE.DoubleSide,
     depthTest: false,
     depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uVideo:     { value: DUMMY_TEX },
+      uMask:      { value: DUMMY_MASK },
+      uEffectType:{ value: eff.type },
+      uBaseColor: { value: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]) },
+      uEdgeColor: { value: new THREE.Color(eff.edge[0], eff.edge[1], eff.edge[2]) },
+      uTime:      { value: 0 },
+      uHasMask:   { value: 0 },
+    },
+    vertexShader: VERT,
+    fragmentShader: FRAG,
   });
 
-  // Shader material (for when mask is available)
-  let shaderMat = null;
-  try {
-    shaderMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uVideo: { value: null },
-        uMask: { value: null },
-        uEffectType: { value: eff.type },
-        uBaseColor: { value: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]) },
-        uEdgeColor: { value: new THREE.Color(eff.edge[0], eff.edge[1], eff.edge[2]) },
-        uTime: { value: 0 },
-        uHasMask: { value: 0 },
-      },
-      vertexShader: VERT_SHADER,
-      fragmentShader: FRAG_SHADER,
-    });
-  } catch (e) {
-    console.warn('Shader failed, using fallback:', e);
-  }
-
-  const mat = fallbackMat;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.renderOrder = 10;
   quadGroup.add(mesh);
-  quads.push({ mesh, geo, mat, shaderMat, fallbackMat, effectType: eff.type });
 
   const lineGeo = new THREE.BufferGeometry();
   lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
@@ -193,10 +175,14 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   const line = new THREE.LineSegments(lineGeo, lineMat);
   line.renderOrder = 5;
   quadGroup.add(line);
-  connectionLines.push({ line, geo: lineGeo });
+
+  quads.push({ mesh, geo, mat });
+  lines.push({ line, geo: lineGeo });
 }
 
-// ─── Smoothing ──────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────
+function lmToNDC(lm) { return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) }; }
+
 function smoothLandmarks(prev, curr, factor) {
   if (!prev) return curr.map(p => ({...p}));
   return curr.map((p, i) => ({
@@ -206,24 +192,38 @@ function smoothLandmarks(prev, curr, factor) {
   }));
 }
 
+const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 };
+const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
+
+function ribbonAnchor(landmarks, tipIdx, handSide) {
+  const tip = landmarks[tipIdx];
+  const mcp = landmarks[FINGER_MCP[tipIdx]];
+  const pip = landmarks[FINGER_PIP[tipIdx]] || mcp;
+  if (!mcp || !pip) return lmToNDC(tip);
+  const t = tipIdx === 4 ? 0.2 : 0.14;
+  const x = tip.x + (mcp.x - tip.x) * t;
+  const y = tip.y + (mcp.y - tip.y) * t;
+  const z = tip.z + (pip.z - tip.z) * 0.25;
+  const ndc = lmToNDC({ x, y, z });
+  const palm = lmToNDC(landmarks[9]);
+  const spread = tipIdx === 4 || tipIdx === 20 ? 0.045 : 0.02;
+  const dx = ndc.x - palm.x, dy = ndc.y - palm.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: ndc.x + (dx / len) * spread + handSide * 0.006, y: ndc.y + (dy / len) * spread, z };
+}
+
 // ─── MediaPipe callbacks ────────────────────────────────────────────────
 function onHandResults(results) {
   const raw = (results.multiHandLandmarks || []).slice();
   if (raw.length === 0) { smoothHands = [null, null]; return; }
   if (raw.length === 2) raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
   const next = [null, null];
-  for (let h = 0; h < raw.length; h++) {
-    next[h] = smoothLandmarks(smoothHands[h], raw[h], SMOOTHING);
-  }
+  for (let h = 0; h < raw.length; h++) next[h] = smoothLandmarks(smoothHands[h], raw[h], SMOOTHING);
   smoothHands = next;
 }
 
-function onFaceResults(results) { /* faceLandmarks = ... */ }
-
 function onSegmentationResults(results) {
   if (!results.segmentationMask) return;
-
-  // Update mask texture from segmentation mask element
   if (!maskTexture) {
     maskTexture = new THREE.Texture(results.segmentationMask);
     maskTexture.minFilter = THREE.LinearFilter;
@@ -247,12 +247,6 @@ async function loadModels() {
   handsInstance.onResults(onHandResults);
   await handsInstance.send({ image: dummy });
 
-  statusEl.textContent = 'Downloading face model…';
-  faceMeshInstance = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}` });
-  faceMeshInstance.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-  faceMeshInstance.onResults(onFaceResults);
-  await faceMeshInstance.send({ image: dummy });
-
   statusEl.textContent = 'Downloading segmentation model…';
   segmentationInstance = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}` });
   segmentationInstance.setOptions({ modelSelection: 1 });
@@ -263,7 +257,7 @@ async function loadModels() {
   btnEl.style.display = 'block';
 }
 
-// ─── Camera ─────────────────────────────────────────────────────────────
+// ─── Camera + render ───────────────────────────────────────────────────
 async function startCamera() {
   btnEl.style.display = 'none';
   statusEl.textContent = 'Requesting camera…';
@@ -275,66 +269,45 @@ async function startCamera() {
     videoEl.srcObject = stream;
     await videoEl.play();
 
-    // Create video texture
     videoTexture = new THREE.VideoTexture(videoEl);
     videoTexture.minFilter = THREE.LinearFilter;
     videoTexture.magFilter = THREE.LinearFilter;
     videoTexture.generateMipmaps = false;
 
-    // Set video texture on shader materials (fallback materials don't have uniforms)
-    for (const q of quads) {
-      if (q.shaderMat && q.shaderMat.uniforms && q.shaderMat.uniforms.uVideo) {
-        q.shaderMat.uniforms.uVideo.value = videoTexture;
-      }
-    }
+    // Set video texture on all quads
+    for (const q of quads) q.mat.uniforms.uVideo.value = videoTexture;
 
+    // Aspect ratio
     const W = videoEl.videoWidth || 1280;
     const H = videoEl.videoHeight || 720;
     const aspect = window.innerWidth / window.innerHeight;
-    const videoAspect = W / H;
-    if (videoAspect > aspect) {
-      camera.top = 1; camera.bottom = -1;
-      camera.left = -videoAspect / aspect; camera.right = videoAspect / aspect;
-    } else {
-      camera.left = -1; camera.right = 1;
-      camera.top = aspect / videoAspect; camera.bottom = -aspect / videoAspect;
-    }
+    const va = W / H;
+    if (va > aspect) { camera.left = -va/aspect; camera.right = va/aspect; camera.top = 1; camera.bottom = -1; }
+    else { camera.left = -1; camera.right = 1; camera.top = aspect/va; camera.bottom = -aspect/va; }
     camera.updateProjectionMatrix();
 
-    // Tracking loop
-    let trackFrame = 0;
+    // Tracking loop (separate from render)
+    let frame = 0;
     async function track() {
       if (videoEl.readyState >= 2) {
         if (handsInstance) await handsInstance.send({ image: videoEl });
-        trackFrame++;
-        if (faceMeshInstance && trackFrame % 3 === 0) await faceMeshInstance.send({ image: videoEl });
-        if (segmentationInstance && trackFrame % 5 === 0) await segmentationInstance.send({ image: videoEl });
+        frame++;
+        if (segmentationInstance && frame % 5 === 0) await segmentationInstance.send({ image: videoEl });
       }
       requestAnimationFrame(track);
     }
     track();
 
     // Render loop
-    const start = performance.now();
+    const t0 = performance.now();
     function render(now) {
-      const time = (now - start) / 1000;
+      const time = (now - t0) / 1000;
+      const currentMask = maskTexture || DUMMY_MASK;
 
-      // Update mask texture and switch to shader when ready
       for (const q of quads) {
-        const sm = q.shaderMat;
-        if (hasMask && sm && sm.uniforms && sm.uniforms.uVideo && sm.uniforms.uVideo.value === null &&
-            q.mesh.material !== sm) {
-          sm.uniforms.uVideo.value = videoTexture;
-          sm.uniforms.uMask.value = maskTexture;
-          sm.uniforms.uHasMask.value = 1.0;
-          q.mesh.material = sm;
-        }
-        const m = q.mesh.material;
-        if (m && m.uniforms) {
-          if (m.uniforms.uTime) m.uniforms.uTime.value = time;
-          if (m.uniforms.uMask) m.uniforms.uMask.value = maskTexture;
-          if (m.uniforms.uHasMask) m.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
-        }
+        q.mat.uniforms.uMask.value = currentMask;
+        q.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
+        q.mat.uniforms.uTime.value = time;
       }
 
       updateQuads(time);
@@ -352,29 +325,6 @@ async function startCamera() {
   }
 }
 
-// ─── Landmark helpers ───────────────────────────────────────────────────
-function lmToNDC(lm) { return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) }; }
-const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 };
-const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
-
-function ribbonAnchor(landmarks, tipIdx, handSide) {
-  const tip = landmarks[tipIdx];
-  const mcp = landmarks[FINGER_MCP[tipIdx]];
-  const pip = landmarks[FINGER_PIP[tipIdx]] || mcp;
-  if (!mcp || !pip) return lmToNDC(tip);
-  const towardPalm = tipIdx === 4 ? 0.2 : 0.14;
-  const x = tip.x + (mcp.x - tip.x) * towardPalm;
-  const y = tip.y + (mcp.y - tip.y) * towardPalm;
-  const z = tip.z + (pip.z - tip.z) * 0.25;
-  const ndc = lmToNDC({ x, y, z });
-  const palm = lmToNDC(landmarks[9]);
-  const spread = tipIdx === 4 || tipIdx === 20 ? 0.045 : 0.02;
-  const dx = ndc.x - palm.x;
-  const dy = ndc.y - palm.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return { x: ndc.x + (dx / len) * spread + handSide * 0.006, y: ndc.y + (dy / len) * spread, z };
-}
-
 // ─── Update quad positions ──────────────────────────────────────────────
 function updateQuads(time) {
   const hands = smoothHands;
@@ -382,63 +332,49 @@ function updateQuads(time) {
   quadGroup.visible = true;
 
   const L = hands[0], R = hands[1];
-  const wristGap = Math.abs(lmToNDC(L[0]).x - lmToNDC(R[0]).x);
-  const globalGlow = Math.max(0, 1 - wristGap * 1.2);
-
   const Ltips = FINGER_TIPS.map(idx => ribbonAnchor(L, idx, -1));
   const Rtips = FINGER_TIPS.map(idx => ribbonAnchor(R, idx, 1));
 
   for (let i = 0; i < QUAD_COUNT; i++) {
-    const { mesh, geo, mat } = quads[i];
-    const { line, geo: lineGeo } = connectionLines[i];
-
+    const { mesh, geo } = quads[i];
+    const { line, geo: lineGeo } = lines[i];
     const lt = Ltips[i], rt = Rtips[i], rb = Rtips[i+1], lb = Ltips[i+1];
 
-    // Degenerate detection → triangle merge
+    // Degenerate → triangle merge
     const MT = 0.045;
-    const dTR = Math.hypot(lt.x - rt.x, lt.y - rt.y);
-    const dBR = Math.hypot(lb.x - rb.x, lb.y - rb.y);
-    const dTL = Math.hypot(lt.x - lb.x, lt.y - lb.y);
-    const dRR = Math.hypot(rt.x - rb.x, rt.y - rb.y);
-    const mergeTop = dTR < MT, mergeBot = dBR < MT, mergeLeft = dTL < MT, mergeRight = dRR < MT;
-    if ([mergeTop, mergeBot, mergeLeft, mergeRight].filter(Boolean).length >= 3) {
+    const mergeTop = Math.hypot(lt.x-rt.x, lt.y-rt.y) < MT;
+    const mergeBot = Math.hypot(lb.x-rb.x, lb.y-rb.y) < MT;
+    const mergeL   = Math.hypot(lt.x-lb.x, lt.y-lb.y) < MT;
+    const mergeR   = Math.hypot(rt.x-rb.x, rt.y-rb.y) < MT;
+    if ([mergeTop, mergeBot, mergeL, mergeR].filter(Boolean).length >= 3) {
       mesh.visible = false; line.visible = false; continue;
     }
     mesh.visible = true; line.visible = true;
 
-    let verts;
-    if (mergeTop) { const t = {x:(lt.x+rt.x)/2,y:(lt.y+rt.y)/2}; verts = [t,rb,lb,t]; }
-    else if (mergeBot) { const b = {x:(lb.x+rb.x)/2,y:(lb.y+rb.y)/2}; verts = [lt,rt,b,b]; }
-    else if (mergeLeft) { const l = {x:(lt.x+lb.x)/2,y:(lt.y+lb.y)/2}; verts = [l,rt,rb,l]; }
-    else if (mergeRight) { const r = {x:(rt.x+rb.x)/2,y:(rt.y+rb.y)/2}; verts = [lt,r,r,lb]; }
-    else { verts = [lt, rt, rb, lb]; }
+    let v;
+    if (mergeTop) { const t={x:(lt.x+rt.x)/2,y:(lt.y+rt.y)/2}; v=[t,rb,lb,t]; }
+    else if (mergeBot) { const b={x:(lb.x+rb.x)/2,y:(lb.y+rb.y)/2}; v=[lt,rt,b,b]; }
+    else if (mergeL) { const l={x:(lt.x+lb.x)/2,y:(lt.y+lb.y)/2}; v=[l,rt,rb,l]; }
+    else if (mergeR) { const r={x:(rt.x+rb.x)/2,y:(rt.y+rb.y)/2}; v=[lt,r,r,lb]; }
+    else { v = [lt, rt, rb, lb]; }
 
-    const avgZ = (Ltips[i].z + Rtips[i].z + Ltips[i+1].z + Rtips[i+1].z) / 4 || 0;
-    const depth = avgZ * 0.15;
+    const depth = (Ltips[i].z + Rtips[i].z + Ltips[i+1].z + Rtips[i+1].z) / 4 * 0.15 || 0;
     const pos = geo.attributes.position.array;
-    for (let v = 0; v < 4; v++) { pos[v*3] = verts[v].x; pos[v*3+1] = verts[v].y; pos[v*3+2] = depth; }
+    for (let j = 0; j < 4; j++) { pos[j*3]=v[j].x; pos[j*3+1]=v[j].y; pos[j*3+2]=depth; }
     geo.attributes.position.needsUpdate = true;
-    geo.computeVertexNormals();
-
-    mat.uniforms.uGlow && (mat.uniforms.uGlow.value = globalGlow);
 
     const lp = lineGeo.attributes.position.array;
-    lp[0] = verts[0].x; lp[1] = verts[0].y; lp[2] = depth + 0.001;
-    lp[3] = verts[1].x; lp[4] = verts[1].y; lp[5] = depth + 0.001;
+    lp[0]=v[0].x; lp[1]=v[0].y; lp[2]=depth+0.001;
+    lp[3]=v[1].x; lp[4]=v[1].y; lp[5]=depth+0.001;
     lineGeo.attributes.position.needsUpdate = true;
   }
 }
 
 // ─── Resize ─────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
 
 // ─── Bootstrap ──────────────────────────────────────────────────────────
-loadModels().catch(err => {
-  statusEl.textContent = `Error: ${err.message}`;
-  console.error(err);
-});
+loadModels().catch(err => { statusEl.textContent = `Error: ${err.message}`; console.error(err); });
 </script>
 </body>
 </html>
