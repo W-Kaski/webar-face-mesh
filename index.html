@@ -60,11 +60,13 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 // ─── Config ─────────────────────────────────────────────────────────────
 const QUAD_COUNT = 4;
 const FINGER_TIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky
+const QUAD_ANCHORS = [0, 0, 0, 0];       // all quads use thumb (index 0) as anchor
+const QUAD_TARGETS = [1, 2, 3, 4];       // index, middle, ring, pinky
 const QUAD_COLORS = [
-  [0.15, 0.90, 0.85],  // cyan
-  [0.20, 0.85, 0.40],  // green
-  [0.95, 0.85, 0.15],  // gold
-  [0.95, 0.30, 0.25],  // red
+  [0.15, 0.90, 0.85],  // cyan   (thumb↔index)
+  [0.20, 0.85, 0.40],  // green  (thumb↔middle)
+  [0.95, 0.85, 0.15],  // gold   (thumb↔ring)
+  [0.95, 0.30, 0.25],  // red    (thumb↔pinky)
 ];
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -388,16 +390,15 @@ const _tmpPos = new Float32Array(12);
 function updateQuads(time) {
   const hands = smoothHands;
 
-  // Need at least 1 hand to show anything
-  if (!hands[0] && !hands[1]) {
+  // Need BOTH hands to show quads
+  if (!hands[0] || !hands[1]) {
     quadGroup.visible = false;
     return;
   }
   quadGroup.visible = true;
 
-  // If only one hand, mirror it for the other
-  const L = hands[0] || hands[1];
-  const R = hands[1] || hands[0];
+  const L = hands[0];
+  const R = hands[1];
 
   // Global interaction: distance between hands
   const handDist = hands[0] && hands[1]
@@ -406,8 +407,8 @@ function updateQuads(time) {
   const globalGlow = Math.max(0, 1 - handDist * 3);
 
   for (let i = 0; i < QUAD_COUNT; i++) {
-    const tipTop = FINGER_TIPS[i];     // top edge fingertips
-    const tipBot = FINGER_TIPS[i + 1]; // bottom edge fingertips
+    const tipTop = FINGER_TIPS[QUAD_ANCHORS[i]]; // anchor finger (thumb)
+    const tipBot = FINGER_TIPS[QUAD_TARGETS[i]]; // target finger (index/middle/ring/pinky)
 
     const { mesh, geo, mat } = quads[i];
     const { line, geo: lineGeo } = connectionLines[i];
