@@ -1,10 +1,10 @@
 # Hand Quad AR
 
-实时双手追踪 + 手指间连续透视纸带 + 人脸驱动的印刷纹理叠加。
+实时双手追踪 + 手指间连续透视纸带 + 人物剪影驱动的三材料印刷纹理。
 
 ## 效果
 
-双手伸开手指 → 相邻手指间出现连续纸带面片，每个面片由左右手对应手指锚定，整条纸带叠加白底、红色半调点阵、绿色/深蓝色块的人脸印刷纹理。手指弯曲/靠近时面片自动退化为三角形。只有一只手时隐藏所有面片。
+双手伸开手指 → 相邻手指间出现连续纸带面片，每个面片由左右手对应手指锚定。纸带使用三种材料：拇指到食指是红色半调点阵，食指到中指是蓝色油墨纹理，中指到小指是连续红色半调纹理。人物分割 mask 和 Face Mesh 脸部范围共同驱动剪影/脸部阴影。手指弯曲/靠近时面片自动退化为三角形。只有一只手时隐藏所有面片。
 
 ```
 左手                                              右手
@@ -25,6 +25,7 @@
 |---|---|
 | [MediaPipe Hands](https://google.github.io/mediapipe/solutions/hands.html) | 双手 21 点实时追踪 |
 | [MediaPipe Face Mesh](https://google.github.io/mediapipe/solutions/face_mesh.html) | 468 点人脸检测，驱动半调头像纹理 |
+| [MediaPipe Selfie Segmentation](https://google.github.io/mediapipe/solutions/selfie_segmentation.html) | 生成人物剪影 mask |
 | [Three.js](https://threejs.org/) | 3D 渲染，连续四边形/三角形纸带 + 自定义 Shader |
 
 ## 交互
@@ -33,7 +34,7 @@
 - 双手靠近 → 绿色辉光增强
 - 手指太近（退化） → 四边形自动变为三角形
 - 单手 → 所有四边形隐藏
-- 边缘有脉冲呼吸光效
+- 红色材料在无名指轨道附近保留留白，避免每个手指缝重复点阵
 
 ## 本地运行
 
@@ -71,5 +72,7 @@ webar-face-mesh/
        2. 沿手指方向向内延伸 30%（覆盖手指主体）
        3. 预计算所有指尖位置（相邻四边形共享边 = 无缝拼接）
        4. 检测退化：对角线 < 阈值 → 合并顶点为三角形
-       5. 人脸位置驱动红色半调头像纹理，Shader 将纹理连续贴到整条纸带并添加细边线
+       5. Selfie Segmentation 生成前景 mask，Face Mesh 提供脸部 bounds
+       6. 三个 CanvasTexture 分别生成红色半调、蓝色油墨、下半段红色半调
+       7. Shader 将纹理贴到对应手指面；中指→小指共享同一张红色纹理并用 UV 偏移保持连续
 ```

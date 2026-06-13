@@ -53,6 +53,7 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/selfie_segmentation.js"></script>
 
 <script>
 'use strict';
@@ -92,13 +93,40 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
-// ─── Face Texture (MediaPipe Face Mesh → Canvas) ───────────────────────
-const faceCanvas = document.createElement('canvas');
-faceCanvas.width = 512; faceCanvas.height = 512;
-const faceCtx = faceCanvas.getContext('2d');
-const faceTexture = new THREE.CanvasTexture(faceCanvas);
-faceTexture.minFilter = THREE.LinearFilter;
-faceTexture.magFilter = THREE.LinearFilter;
+// ─── Material Textures ─────────────────────────────────────────────────
+const TEX_SIZE = 512;
+
+function createTextureLayer() {
+  const canvas = document.createElement('canvas');
+  canvas.width = TEX_SIZE;
+  canvas.height = TEX_SIZE;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return { canvas, ctx, texture };
+}
+
+const textureLayers = {
+  redTop: createTextureLayer(),
+  blueMid: createTextureLayer(),
+  redBottom: createTextureLayer(),
+};
+
+const quadMaterials = [
+  { layer: textureLayers.redTop, uvOffset: 0.0, uvScale: 1.0, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
+  { layer: textureLayers.blueMid, uvOffset: 0.0, uvScale: 1.0, base: [0.90, 0.95, 0.94], edgeA: [0.04, 0.16, 0.28], edgeB: [0.05, 0.42, 0.18] },
+  { layer: textureLayers.redBottom, uvOffset: 0.5, uvScale: 0.5, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
+  { layer: textureLayers.redBottom, uvOffset: 0.0, uvScale: 0.5, base: [0.98, 0.98, 0.93], edgeA: [0.72, 0.05, 0.13], edgeB: [0.72, 0.05, 0.13] },
+];
+
+const personMaskCanvas = document.createElement('canvas');
+personMaskCanvas.width = TEX_SIZE;
+personMaskCanvas.height = TEX_SIZE;
+const personMaskCtx = personMaskCanvas.getContext('2d', { willReadFrequently: true });
+let hasPersonMask = false;
+let faceBounds = null;
+let textureClock = 0;
 
 function ellipseContains(x, y, cx, cy, rx, ry) {
   const dx = (x - cx) / rx;
@@ -106,108 +134,164 @@ function ellipseContains(x, y, cx, cy, rx, ry) {
   return dx * dx + dy * dy <= 1;
 }
 
-function drawPaperGrain() {
-  faceCtx.fillStyle = '#f8f9ef';
-  faceCtx.fillRect(0, 0, 512, 512);
+function noise2(x, y, seed) {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + seed * 37.719) * 43758.5453;
+  return n - Math.floor(n);
+}
 
-  faceCtx.globalAlpha = 0.16;
-  for (let y = 0; y < 512; y += 9) {
-    faceCtx.fillStyle = y % 18 === 0 ? '#d9ddcf' : '#ffffff';
-    faceCtx.fillRect(0, y, 512, 1);
+function fillPaper(ctx, tint) {
+  ctx.fillStyle = tint || '#fbfbf2';
+  ctx.fillRect(0, 0, TEX_SIZE, TEX_SIZE);
+  ctx.globalAlpha = 0.12;
+  for (let y = 0; y < TEX_SIZE; y += 7) {
+    ctx.fillStyle = y % 14 === 0 ? '#d9dccf' : '#ffffff';
+    ctx.fillRect(0, y, TEX_SIZE, 1);
   }
-  faceCtx.globalAlpha = 1;
+  ctx.globalAlpha = 1;
 }
 
-function drawAccentBands(timeSeed) {
-  faceCtx.save();
-  faceCtx.globalAlpha = 0.98;
-
-  faceCtx.fillStyle = '#00a62a';
-  faceCtx.beginPath();
-  faceCtx.moveTo(36, 0);
-  faceCtx.lineTo(145, 0);
-  faceCtx.bezierCurveTo(127, 76, 150, 142, 105, 203);
-  faceCtx.bezierCurveTo(73, 247, 82, 311, 118, 368);
-  faceCtx.lineTo(22, 512);
-  faceCtx.lineTo(0, 512);
-  faceCtx.lineTo(0, 0);
-  faceCtx.closePath();
-  faceCtx.fill();
-
-  faceCtx.fillStyle = '#00a62a';
-  faceCtx.fillRect(184, 0, 156, 72);
-  faceCtx.beginPath();
-  faceCtx.moveTo(314, 282);
-  faceCtx.bezierCurveTo(390, 235, 423, 286, 512, 243);
-  faceCtx.lineTo(512, 426);
-  faceCtx.bezierCurveTo(437, 454, 376, 422, 310, 457);
-  faceCtx.closePath();
-  faceCtx.fill();
-
-  faceCtx.fillStyle = '#0e4364';
-  faceCtx.beginPath();
-  faceCtx.moveTo(0, 430);
-  faceCtx.lineTo(512, 116);
-  faceCtx.lineTo(512, 178);
-  faceCtx.lineTo(0, 488);
-  faceCtx.closePath();
-  faceCtx.fill();
-
-  faceCtx.globalAlpha = 0.9;
-  faceCtx.strokeStyle = '#b83a46';
-  faceCtx.lineWidth = 2;
-  faceCtx.beginPath();
-  faceCtx.moveTo(0, 120 + Math.sin(timeSeed) * 8);
-  faceCtx.bezierCurveTo(130, 95, 232, 155, 512, 102);
-  faceCtx.stroke();
-
-  faceCtx.restore();
+function getMaskData() {
+  if (!hasPersonMask) return null;
+  return personMaskCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
 }
 
-function drawHalftoneFace(xMin, yMin, xMax, yMax) {
-  const S = 512;
-  const fw = xMax - xMin;
-  const fh = yMax - yMin;
-  const cx = ((xMin + xMax) * 0.5) * S;
-  const cy = ((yMin + yMax) * 0.5) * S;
-  const rx = Math.max(68, fw * S * 0.58);
-  const ry = Math.max(94, fh * S * 0.64);
-  const step = 8;
+function sampleMask(maskData, x, y, fallbackShift) {
+  if (maskData) {
+    const px = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(x)));
+    const py = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(y)));
+    const i = (py * TEX_SIZE + px) * 4;
+    return Math.max(maskData[i], maskData[i + 3]) / 255;
+  }
 
-  faceCtx.fillStyle = '#bd1730';
-  for (let y = Math.max(0, cy - ry - 28); y <= Math.min(S, cy + ry + 28); y += step) {
-    for (let x = Math.max(0, cx - rx - 28); x <= Math.min(S, cx + rx + 28); x += step) {
-      const inHead = ellipseContains(x, y, cx, cy, rx, ry);
-      const sideShadow = ellipseContains(x, y, cx - rx * 0.38, cy + ry * 0.04, rx * 0.42, ry * 0.88);
-      const hairMass = ellipseContains(x, y, cx, cy - ry * 0.62, rx * 0.9, ry * 0.28);
-      const cheek = ellipseContains(x, y, cx + rx * 0.35, cy + ry * 0.18, rx * 0.28, ry * 0.42);
-      const eyeCut = ellipseContains(x, y, cx + rx * 0.05, cy - ry * 0.16, rx * 0.33, ry * 0.11);
-      const faceGap = ellipseContains(x, y, cx + rx * 0.12, cy + ry * 0.12, rx * 0.24, ry * 0.38);
-      if ((!inHead && !sideShadow && !hairMass && !cheek) || eyeCut || faceGap) continue;
+  const b = faceBounds || { xMin: 0.39, yMin: 0.2, xMax: 0.61, yMax: 0.7 };
+  const cx = ((b.xMin + b.xMax) * 0.5 + (fallbackShift || 0)) * TEX_SIZE;
+  const cy = ((b.yMin + b.yMax) * 0.5) * TEX_SIZE;
+  const rx = Math.max(64, (b.xMax - b.xMin) * TEX_SIZE * 0.65);
+  const ry = Math.max(118, (b.yMax - b.yMin) * TEX_SIZE * 0.78);
+  if (ellipseContains(x, y, cx, cy, rx, ry)) return 0.95;
+  if (ellipseContains(x, y, cx - rx * 0.2, cy - ry * 0.66, rx * 0.78, ry * 0.25)) return 0.75;
+  return 0;
+}
 
-      const dx = Math.abs((x - cx) / rx);
-      const dy = Math.abs((y - cy) / ry);
-      const tone = Math.max(0.2, 1.0 - (dx * 0.35 + dy * 0.28));
-      const r = 1.2 + tone * 2.25;
-      faceCtx.globalAlpha = 0.92 - Math.min(0.48, dx * 0.38 + dy * 0.18);
-      faceCtx.beginPath();
-      faceCtx.arc(x, y, r, 0, Math.PI * 2);
-      faceCtx.fill();
+function drawFaceShadow(ctx, color, alpha, offsetX) {
+  if (!faceBounds) return;
+  const b = faceBounds;
+  const cx = ((b.xMin + b.xMax) * 0.5 + (offsetX || 0)) * TEX_SIZE;
+  const cy = ((b.yMin + b.yMax) * 0.5) * TEX_SIZE;
+  const rx = Math.max(58, (b.xMax - b.xMin) * TEX_SIZE * 0.55);
+  const ry = Math.max(92, (b.yMax - b.yMin) * TEX_SIZE * 0.66);
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, -0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.ellipse(cx + rx * 0.18, cy + ry * 0.04, rx * 0.32, ry * 0.45, 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRedHalftone(layer, variant) {
+  const ctx = layer.ctx;
+  const maskData = getMaskData();
+  fillPaper(ctx, '#fbfbf2');
+
+  ctx.save();
+  ctx.fillStyle = '#bd1730';
+  const step = variant === 'bottom' ? 7 : 8;
+  for (let y = 4; y < TEX_SIZE; y += step) {
+    const noDotRingBand = variant === 'bottom' && Math.abs(y / TEX_SIZE - 0.5) < 0.085;
+    for (let x = 4; x < TEX_SIZE; x += step) {
+      if (noDotRingBand) continue;
+      const shiftedX = x + (variant === 'top' ? -28 : 18);
+      const m = sampleMask(maskData, shiftedX, y, variant === 'top' ? -0.08 : 0.1);
+      const diagonal = Math.abs((x - TEX_SIZE * 0.55) - (y - TEX_SIZE * 0.5) * 0.55) < 44;
+      const edgeColumn = variant === 'bottom' && (x > TEX_SIZE * 0.73 || x < TEX_SIZE * 0.18);
+      const active = m > 0.18 || diagonal || edgeColumn;
+      if (!active) continue;
+      const n = noise2(x, y, variant === 'top' ? 3 : 9);
+      const silhouette = Math.max(0, m - 0.12);
+      const r = 1.15 + silhouette * 3.2 + (diagonal ? 1.2 : 0) + n * 0.45;
+      ctx.globalAlpha = Math.min(0.96, 0.28 + silhouette * 0.65 + (diagonal ? 0.28 : 0));
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
-  faceCtx.globalAlpha = 1;
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = '#a71d2c';
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.78;
+  ctx.beginPath();
+  ctx.moveTo(variant === 'top' ? -10 : 40, variant === 'top' ? 96 : 430);
+  ctx.bezierCurveTo(160, variant === 'top' ? 70 : 365, 280, variant === 'top' ? 142 : 468, 540, variant === 'top' ? 110 : 380);
+  ctx.stroke();
+  ctx.restore();
+
+  drawFaceShadow(ctx, '#bd1730', variant === 'top' ? 0.22 : 0.18, variant === 'top' ? -0.05 : 0.08);
+  layer.texture.needsUpdate = true;
 }
 
-// Draw a high-contrast print texture driven by the detected face bounds.
-function drawFaceToCanvas() {
-  drawPaperGrain();
-  drawAccentBands(faceLandmarks.length);
-  if (faceLandmarks.length === 0) {
-    faceTexture.needsUpdate = true;
-    faceTextureReady = true;
-    return;
-  }
+function drawBlueInk(layer) {
+  const ctx = layer.ctx;
+  const maskData = getMaskData();
+  fillPaper(ctx, '#f6f9f0');
 
+  ctx.save();
+  ctx.fillStyle = '#0b3c5d';
+  ctx.beginPath();
+  ctx.moveTo(-60, TEX_SIZE * 0.92);
+  ctx.lineTo(TEX_SIZE + 60, TEX_SIZE * 0.12);
+  ctx.lineTo(TEX_SIZE + 60, TEX_SIZE * 0.48);
+  ctx.lineTo(-60, TEX_SIZE * 1.05);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = '#0e5374';
+  ctx.beginPath();
+  ctx.moveTo(TEX_SIZE * 0.05, TEX_SIZE * 0.72);
+  ctx.lineTo(TEX_SIZE * 0.74, TEX_SIZE * 0.18);
+  ctx.lineTo(TEX_SIZE * 0.82, TEX_SIZE * 0.31);
+  ctx.lineTo(TEX_SIZE * 0.16, TEX_SIZE * 0.86);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = '#07a234';
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  ctx.moveTo(TEX_SIZE * 0.66, TEX_SIZE * 0.44);
+  ctx.bezierCurveTo(TEX_SIZE * 0.83, TEX_SIZE * 0.32, TEX_SIZE * 0.88, TEX_SIZE * 0.54, TEX_SIZE * 1.02, TEX_SIZE * 0.48);
+  ctx.lineTo(TEX_SIZE, TEX_SIZE * 0.76);
+  ctx.bezierCurveTo(TEX_SIZE * 0.82, TEX_SIZE * 0.83, TEX_SIZE * 0.72, TEX_SIZE * 0.62, TEX_SIZE * 0.58, TEX_SIZE * 0.73);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.fillStyle = '#f9fbf2';
+  for (let y = 0; y < TEX_SIZE; y += 5) {
+    for (let x = 0; x < TEX_SIZE; x += 5) {
+      const m = sampleMask(maskData, x, y, 0);
+      if (m < 0.18) continue;
+      const scrape = noise2(x, y, 17) > 0.34;
+      if (!scrape) continue;
+      ctx.globalAlpha = 0.24 + m * 0.64;
+      ctx.fillRect(x, y, 3 + m * 7, 1 + m * 3);
+    }
+  }
+  ctx.restore();
+
+  drawFaceShadow(ctx, '#f9fbf2', 0.5, 0.03);
+  layer.texture.needsUpdate = true;
+}
+
+function updateFaceBounds() {
+  if (faceLandmarks.length === 0) return;
   let xMin=1, yMin=1, xMax=0, yMax=0;
   for (const lm of faceLandmarks) {
     if (lm.x < xMin) xMin = lm.x;
@@ -216,12 +300,18 @@ function drawFaceToCanvas() {
     if (lm.y > yMax) yMax = lm.y;
   }
   const pad = 0.03;
-  xMin -= pad; yMin -= pad; xMax += pad; yMax += pad;
-  drawHalftoneFace(xMin, yMin, xMax, yMax);
+  faceBounds = { xMin: xMin - pad, yMin: yMin - pad, xMax: xMax + pad, yMax: yMax + pad };
+}
 
-  faceTexture.needsUpdate = true;
+function drawMaterialTextures() {
+  textureClock++;
+  drawRedHalftone(textureLayers.redTop, 'top');
+  drawBlueInk(textureLayers.blueMid);
+  drawRedHalftone(textureLayers.redBottom, 'bottom');
   faceTextureReady = true;
 }
+
+drawMaterialTextures();
 
 // ─── Quad Geometry ──────────────────────────────────────────────────────
 const quads = [];
@@ -242,20 +332,25 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geo.setIndex(indices);
 
-  const [r, g, b] = QUAD_COLORS[i];
+  const materialPlan = quadMaterials[i];
+  const [r, g, b] = materialPlan.base;
+  const [er1, eg1, eb1] = materialPlan.edgeA;
+  const [er2, eg2, eb2] = materialPlan.edgeB;
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     side: THREE.DoubleSide,
     uniforms: {
-      uTexture: { value: faceTexture },
+      uTexture: { value: materialPlan.layer.texture },
       uColor:   { value: new THREE.Color(r, g, b) },
+      uEdgeA:   { value: new THREE.Color(er1, eg1, eb1) },
+      uEdgeB:   { value: new THREE.Color(er2, eg2, eb2) },
       uOpacity: { value: STRIP_OPACITY },
       uGlow:    { value: 0.0 },
       uTime:    { value: 0.0 },
-      uPanelIndex: { value: i },
-      uPanelCount: { value: QUAD_COUNT },
+      uUvOffset: { value: materialPlan.uvOffset },
+      uUvScale:  { value: materialPlan.uvScale },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -267,15 +362,17 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     fragmentShader: `
       uniform sampler2D uTexture;
       uniform vec3 uColor;
+      uniform vec3 uEdgeA;
+      uniform vec3 uEdgeB;
       uniform float uOpacity;
       uniform float uGlow;
       uniform float uTime;
-      uniform float uPanelIndex;
-      uniform float uPanelCount;
+      uniform float uUvOffset;
+      uniform float uUvScale;
       varying vec2 vUv;
 
       void main() {
-        vec2 stripUv = vec2(vUv.x, 1.0 - ((uPanelIndex + (1.0 - vUv.y)) / uPanelCount));
+        vec2 stripUv = vec2(vUv.x, uUvOffset + vUv.y * uUvScale);
         vec4 tex = texture2D(uTexture, stripUv);
 
         vec3 paper = mix(uColor, tex.rgb, 0.92);
@@ -283,9 +380,7 @@ for (let i = 0; i < QUAD_COUNT; i++) {
 
         float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
         float edge = 1.0 - smoothstep(0.0, 0.024, edgeDist);
-        vec3 warmEdge = vec3(0.58, 0.06, 0.12);
-        vec3 coolEdge = vec3(0.08, 0.18, 0.54);
-        col = mix(col, mix(warmEdge, coolEdge, step(0.5, vUv.x)), edge * 0.72);
+        col = mix(col, mix(uEdgeA, uEdgeB, step(0.5, vUv.x)), edge * 0.72);
 
         float crease = smoothstep(0.012, 0.0, abs(vUv.y - 1.0));
         float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + stripUv.x * 8.0);
@@ -329,6 +424,7 @@ function smoothLandmarks(prev, curr, factor) {
 // ─── MediaPipe: Hands ───────────────────────────────────────────────────
 let handsInstance = null;
 let faceMeshInstance = null;
+let segmentationInstance = null;
 let modelsReady = 0;
 
 async function loadModels() {
@@ -363,6 +459,17 @@ async function loadModels() {
   faceMeshInstance.onResults(onFaceResults);
   await faceMeshInstance.send({ image: dummy });
 
+  statusEl.textContent = 'Downloading silhouette model…';
+  segmentationInstance = new SelfieSegmentation({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1/${f}`,
+  });
+  segmentationInstance.setOptions({
+    modelSelection: 1,
+    selfieMode: true,
+  });
+  segmentationInstance.onResults(onSegmentationResults);
+  await segmentationInstance.send({ image: dummy });
+
   statusEl.textContent = 'Ready!';
   btnEl.style.display = 'block';
 }
@@ -390,7 +497,19 @@ function onHandResults(results) {
 
 function onFaceResults(results) {
   faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
-  drawFaceToCanvas();
+  updateFaceBounds();
+  drawMaterialTextures();
+}
+
+function onSegmentationResults(results) {
+  personMaskCtx.clearRect(0, 0, TEX_SIZE, TEX_SIZE);
+  if (results.segmentationMask) {
+    personMaskCtx.drawImage(results.segmentationMask, 0, 0, TEX_SIZE, TEX_SIZE);
+    hasPersonMask = true;
+  } else {
+    hasPersonMask = false;
+  }
+  drawMaterialTextures();
 }
 
 // ─── Camera ─────────────────────────────────────────────────────────────
@@ -430,6 +549,7 @@ async function startCamera() {
       if (videoEl.readyState >= 2) {
         if (handsInstance)       await handsInstance.send({ image: videoEl });
         if (faceMeshInstance)    await faceMeshInstance.send({ image: videoEl });
+        if (segmentationInstance) await segmentationInstance.send({ image: videoEl });
       }
       requestAnimationFrame(loop);
     }
