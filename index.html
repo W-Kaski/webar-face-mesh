@@ -319,16 +319,17 @@ async function startCamera() {
 
       // Update mask texture and switch to shader when ready
       for (const q of quads) {
-        if (hasMask && q.shaderMat && q.shaderMat.uniforms && q.shaderMat.uniforms.uVideo &&
-            q.mesh.material !== q.shaderMat) {
-          q.shaderMat.uniforms.uVideo.value = videoTexture;
-          q.shaderMat.uniforms.uMask.value = maskTexture;
-          q.shaderMat.uniforms.uHasMask.value = 1.0;
-          q.mesh.material = q.shaderMat;
+        const sm = q.shaderMat;
+        if (hasMask && sm && sm.uniforms && sm.uniforms.uVideo && sm.uniforms.uVideo.value === null &&
+            q.mesh.material !== sm) {
+          sm.uniforms.uVideo.value = videoTexture;
+          sm.uniforms.uMask.value = maskTexture;
+          sm.uniforms.uHasMask.value = 1.0;
+          q.mesh.material = sm;
         }
         const m = q.mesh.material;
-        if (m && m.uniforms && m.uniforms.uTime) {
-          m.uniforms.uTime.value = time;
+        if (m && m.uniforms) {
+          if (m.uniforms.uTime) m.uniforms.uTime.value = time;
           if (m.uniforms.uMask) m.uniforms.uMask.value = maskTexture;
           if (m.uniforms.uHasMask) m.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
         }
