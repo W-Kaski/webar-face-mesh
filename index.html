@@ -35,9 +35,9 @@ const QUAD_COUNT = 3;
 const FINGER_TIPS = [4, 8, 12, 20];
 const SMOOTHING = 0.42;
 const EFFECTS = [
-  { type: 0, base: [0.96, 0.96, 0.91], edge: [0.72, 0.05, 0.13] },
-  { type: 1, base: [0.04, 0.16, 0.28], edge: [0.96, 0.96, 0.91] },
-  { type: 2, base: [0.96, 0.96, 0.91], edge: [0.10, 0.55, 0.18] },
+  { type: 0, stencilRef: 1, base: [0.96, 0.96, 0.91], edge: [0.72, 0.05, 0.13] },
+  { type: 1, stencilRef: 2, base: [0.04, 0.16, 0.28], edge: [0.96, 0.96, 0.91] },
+  { type: 2, stencilRef: 4, base: [0.96, 0.96, 0.91], edge: [0.10, 0.55, 0.18] },
 ];
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -47,7 +47,6 @@ let segmentationInstance = null;
 let videoTexture = null;
 let maskTexture = null;
 let hasMask = false;
-let grabTexture = null;
 let gl = null;
 
 // ─── DOM ────────────────────────────────────────────────────────────────
@@ -76,25 +75,31 @@ DUMMY_TEX.needsUpdate = true;
 const DUMMY_MASK = new THREE.DataTexture(new Uint8Array([0,0,0,255]), 1, 1, THREE.RGBAFormat);
 DUMMY_MASK.needsUpdate = true;
 
-// ─── Grab texture (captures camera background for effect sampling) ──────
+// ─── FIX 1: Grab texture via readPixels → DataTexture (Three.js compatible) ──
+let grabPixels = null;
+const grabTex = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
+grabTex.needsUpdate = true;
+
 function initGrabTexture() {
   gl = renderer.getContext();
-  grabTexture = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, grabTexture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const w = renderer.domElement.width;
+  const h = renderer.domElement.height;
+  grabPixels = new Uint8Array(w * h * 4);
+  grabTex.image = { data: grabPixels, width: w, height: h };
+  grabTex.needsUpdate = true;
 }
 
 function grabScreen() {
   const w = renderer.domElement.width;
   const h = renderer.domElement.height;
-  gl.bindTexture(gl.TEXTURE_2D, grabTexture);
-  gl.copyTexImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 0, 0, w, h, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, grabPixels);
+  grabTex.needsUpdate = true;
+  // Force Three.js to re-upload the texture
+  renderer.state.unbindTexture();
 }
 
-// ─── Camera background (full-screen quad) ───────────────────────────────
+// ─── Camera background ──────────────────────────────────────────────────
 const camBG = new THREE.Mesh(
   new THREE.PlaneGeometry(2, 2),
   new THREE.MeshBasicMaterial({ map: DUMMY_TEX, depthTest: false, depthWrite: false })
@@ -103,30 +108,33 @@ camBG.renderOrder = 0;
 camBG.frustumCulled = false;
 scene.add(camBG);
 
-// ─── Stencil quads (write mask, no color output) ────────────────────────
+// ─── FIX 2: Stencil quads with explicit stencilWriteMask ────────────────
 const stencilQuads = [];
 const stencilLines = [];
 const quadGroup = new THREE.Group();
 scene.add(quadGroup);
 
-const stencilWriteMat = new THREE.MeshBasicMaterial({
-  colorWrite: false,
-  depthTest: false,
-  depthWrite: false,
-  stencilWrite: true,
-  stencilRef: 1,
-  stencilFunc: THREE.AlwaysStencilFunc,
-  stencilFail: THREE.ReplaceStencilOp,
-  stencilZFail: THREE.ReplaceStencilOp,
-  stencilZPass: THREE.ReplaceStencilOp,
-});
-
 for (let i = 0; i < QUAD_COUNT; i++) {
+  const eff = EFFECTS[i];
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
   geo.setIndex([0, 1, 2, 0, 2, 3]);
 
-  const mesh = new THREE.Mesh(geo, stencilWriteMat);
+  const mat = new THREE.MeshBasicMaterial({
+    colorWrite: false,
+    depthTest: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilWriteMask: 0xFF,
+    stencilRef: eff.stencilRef,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilFail: THREE.ReplaceStencilOp,
+    stencilZFail: THREE.ReplaceStencilOp,
+    stencilZPass: THREE.ReplaceStencilOp,
+  });
+
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.renderOrder = 5;
   quadGroup.add(mesh);
 
@@ -140,11 +148,11 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   line.renderOrder = 5;
   quadGroup.add(line);
 
-  stencilQuads.push({ mesh, geo });
+  stencilQuads.push({ mesh, geo, mat });
   stencilLines.push({ line, geo: lineGeo });
 }
 
-// ─── Effect pass (full-screen quad, stencil-tested, samples grab+mask) ──
+// ─── FIX 3: Effect passes with per-quad stencilRef (no overlap) ─────────
 const EFFECT_VERT = `
   varying vec2 vUv;
   void main() {
@@ -164,7 +172,6 @@ const EFFECT_FRAG = `
   varying vec2 vUv;
 
   void main() {
-    // Sample grabbed camera background
     vec3 bg = texture2D(uGrab, vUv).rgb;
     float m = texture2D(uMask, vUv).r;
 
@@ -174,8 +181,6 @@ const EFFECT_FRAG = `
     }
 
     vec3 col = bg;
-    float alpha = 1.0;
-
     float e = 0.006;
     float mR = texture2D(uMask, vUv + vec2(e, 0.0)).r;
     float mL = texture2D(uMask, vUv - vec2(e, 0.0)).r;
@@ -184,19 +189,16 @@ const EFFECT_FRAG = `
     float edge = max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
 
     if (uEffectType < 0.5) {
-      // Red outline: edge → red, interior → base
       if (edge > 0.08) { col = uEdgeColor; }
       else { col = uBaseColor; }
     } else if (uEffectType < 1.5) {
-      // White silhouette: person → white blend, bg → base
       col = mix(uBaseColor, uEdgeColor, m * 0.85);
     } else {
-      // Green outline
       if (edge > 0.08) { col = uEdgeColor; }
       else { col = uBaseColor; }
     }
 
-    gl_FragColor = vec4(col, alpha);
+    gl_FragColor = vec4(col, 1.0);
   }
 `;
 
@@ -210,8 +212,9 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     depthTest: false,
     depthWrite: false,
     stencilWrite: false,
+    stencilWriteMask: 0x00,
     stencilTest: true,
-    stencilRef: 1,
+    stencilRef: eff.stencilRef,
     stencilFunc: THREE.EqualStencilFunc,
     stencilFail: THREE.KeepStencilOp,
     stencilZFail: THREE.KeepStencilOp,
@@ -354,11 +357,11 @@ async function startCamera() {
     }
     track();
 
-    // Render loop (stencil pipeline)
+    // FIX 4+5: Two-pass render with proper state management
     function render() {
       const currentMask = maskTexture || DUMMY_MASK;
 
-      // Pass 1: Render camera background → grab to texture
+      // Pass 1: Render camera background → grab
       camBG.visible = true;
       quadGroup.visible = false;
       for (const ep of effectPasses) ep.mesh.visible = false;
@@ -366,17 +369,20 @@ async function startCamera() {
       renderer.render(scene, camera);
       grabScreen();
 
-      // Pass 2: Stencil quads write mask, effect passes draw with grab texture
+      // Pass 2: Stencil write + effect (keep color from pass 1)
       camBG.visible = false;
       quadGroup.visible = true;
       for (const ep of effectPasses) {
         ep.mesh.visible = true;
-        ep.mat.uniforms.uGrab.value = grabTexture;
+        ep.mat.uniforms.uGrab.value = grabTex;
         ep.mat.uniforms.uMask.value = currentMask;
         ep.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
       }
       updateQuads();
-      renderer.clear(false, true, true); // clear depth+stencil, keep color from pass 1
+      // Clear depth+stencil only, preserve color
+      renderer.state.buffers.depth.setMask(true);
+      renderer.state.buffers.stencil.setMask(true);
+      gl.clear(gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
       renderer.render(scene, camera);
 
       requestAnimationFrame(render);
