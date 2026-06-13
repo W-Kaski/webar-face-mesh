@@ -3,11 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Face Mesh AR</title>
+<title>Hand Quads</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{overflow:hidden;background:#000;font-family:system-ui}
-canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
+#video{
+  position:fixed;top:0;left:0;width:100%;height:100%;
+  object-fit:cover;z-index:0;transform:scaleX(-1);
+}
+#three-canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
 #loading{
   position:fixed;inset:0;z-index:999;
   display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -27,15 +31,9 @@ canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
 }
 #hud{
   position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:50;
-  background:rgba(0,0,0,0.5);backdrop-filter:blur(6px);color:rgba(255,255,255,0.85);
+  background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);color:rgba(255,255,255,0.85);
   padding:8px 20px;border-radius:20px;font-size:12px;
   pointer-events:none;opacity:0;transition:opacity 0.5s;
-}
-#mode-btn{
-  position:fixed;top:16px;right:16px;z-index:50;
-  padding:8px 16px;border:1px solid rgba(255,255,255,0.2);border-radius:16px;
-  background:rgba(0,0,0,0.4);backdrop-filter:blur(6px);color:#fff;font-size:12px;
-  cursor:pointer;
 }
 </style>
 </head>
@@ -43,55 +41,245 @@ canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
 
 <div id="loading">
   <div class="spinner"></div>
-  <p id="status">Loading Face Mesh model…</p>
+  <p id="status">Loading models…</p>
   <button id="btn" onclick="startCamera()">Start Camera</button>
 </div>
-<div id="hud">Move your face in front of the camera</div>
-<button id="mode-btn">Switch Mode</button>
-<canvas id="c"></canvas>
+<div id="hud">Show both hands to the camera</div>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="three-canvas"></canvas>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
 
 <script>
 'use strict';
 
 // ─── Config ─────────────────────────────────────────────────────────────
-const COLOR    = [100, 255, 218];   // #64ffda
-const POINT_SZ = 0.006;
-const modes    = ['wireframe', 'pointcloud', 'solid', 'glow'];
-let modeIdx    = 0;
+const QUAD_COUNT = 4;
+const FINGER_TIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky
+const QUAD_COLORS = [
+  [0.15, 0.90, 0.85],  // cyan
+  [0.20, 0.85, 0.40],  // green
+  [0.95, 0.85, 0.15],  // gold
+  [0.95, 0.30, 0.25],  // red
+];
 
 // ─── State ──────────────────────────────────────────────────────────────
+let handData = [];          // [{landmarks: 21 points}, {landmarks: 21 points}]
 let faceLandmarks = [];
-let faceReady     = false;
-let W = 640, H = 480;
+let smoothHands = [null, null]; // smoothed hand positions
+let faceTextureReady = false;
 
 // ─── DOM ────────────────────────────────────────────────────────────────
-const canvasEl  = document.getElementById('c');
+const videoEl   = document.getElementById('video');
+const canvasEl  = document.getElementById('three-canvas');
 const loadingEl = document.getElementById('loading');
 const statusEl  = document.getElementById('status');
 const btnEl     = document.getElementById('btn');
 const hudEl     = document.getElementById('hud');
-const modeBtnEl = document.getElementById('mode-btn');
 
-// ─── Three.js Scene ─────────────────────────────────────────────────────
-const scene    = new THREE.Scene();
-const camera   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const renderer = new THREE.WebGLRenderer({ canvas: canvasEl, alpha: true, antialias: true });
+// ─── Three.js Setup ─────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const renderer = new THREE.WebGLRenderer({
+  canvas: canvasEl, alpha: true, antialias: true,
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x000000, 1);
+renderer.setClearColor(0x000000, 0);
 
-// Face group (all face visuals live here)
-const faceGroup = new THREE.Group();
-scene.add(faceGroup);
+// ─── Face Texture (MediaPipe Face Mesh → Canvas) ───────────────────────
+const faceCanvas = document.createElement('canvas');
+faceCanvas.width = 512; faceCanvas.height = 512;
+const faceCtx = faceCanvas.getContext('2d');
+const faceTexture = new THREE.CanvasTexture(faceCanvas);
+faceTexture.minFilter = THREE.LinearFilter;
+faceTexture.magFilter = THREE.LinearFilter;
 
-// ─── MediaPipe Face Mesh ───────────────────────────────────────────────
+// Draw face mesh onto canvas
+function drawFaceToCanvas() {
+  faceCtx.fillStyle = '#111';
+  faceCtx.fillRect(0, 0, 512, 512);
+  if (faceLandmarks.length === 0) return;
+
+  const S = 512;
+  // Find bounding box
+  let xMin=1, yMin=1, xMax=0, yMax=0;
+  for (const lm of faceLandmarks) {
+    if (lm.x < xMin) xMin = lm.x;
+    if (lm.x > xMax) xMax = lm.x;
+    if (lm.y < yMin) yMin = lm.y;
+    if (lm.y > yMax) yMax = lm.y;
+  }
+  const pad = 0.05;
+  xMin -= pad; yMin -= pad; xMax += pad; yMax += pad;
+  const fw = xMax - xMin, fh = yMax - yMin;
+  const scale = Math.min(0.9 / fw, 0.9 / fh) * S;
+  const ox = (S - fw * scale) / 2;
+  const oy = (S - fh * scale) / 2;
+
+  function tx(lm) { return ox + (lm.x - xMin) * scale; }
+  function ty(lm) { return oy + (lm.y - yMin) * scale; }
+
+  // Triangulated fill
+  faceCtx.lineWidth = 1;
+  faceCtx.strokeStyle = 'rgba(100,255,218,0.3)';
+  faceCtx.fillStyle   = 'rgba(100,255,218,0.05)';
+  for (let i = 0; i < TRI.length; i += 3) {
+    const a = faceLandmarks[TRI[i]], b = faceLandmarks[TRI[i+1]], c = faceLandmarks[TRI[i+2]];
+    if (!a||!b||!c) continue;
+    faceCtx.beginPath();
+    faceCtx.moveTo(tx(a), ty(a));
+    faceCtx.lineTo(tx(b), ty(b));
+    faceCtx.lineTo(tx(c), ty(c));
+    faceCtx.closePath();
+    faceCtx.fill();
+    faceCtx.stroke();
+  }
+
+  // Points
+  faceCtx.fillStyle = 'rgba(100,255,218,0.8)';
+  for (const lm of faceLandmarks) {
+    faceCtx.beginPath();
+    faceCtx.arc(tx(lm), ty(lm), 1.5, 0, Math.PI * 2);
+    faceCtx.fill();
+  }
+
+  faceTexture.needsUpdate = true;
+  faceTextureReady = true;
+}
+
+// ─── Quad Geometry ──────────────────────────────────────────────────────
+const quads = [];
+const connectionLines = [];
+const quadGroup = new THREE.Group();
+scene.add(quadGroup);
+
+// Create 4 quads
+for (let i = 0; i < QUAD_COUNT; i++) {
+  const geo = new THREE.BufferGeometry();
+  // 4 vertices × 3 floats + UVs
+  const positions = new Float32Array(12);  // 4 corners × 3
+  const uvs = new Float32Array([
+    0, 1,  1, 1,  1, 0,  0, 0   // quad UV mapping
+  ]);
+  const indices = [0, 1, 2,  0, 2, 3]; // two triangles
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+
+  const [r, g, b] = QUAD_COLORS[i];
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTexture: { value: faceTexture },
+      uColor:   { value: new THREE.Color(r, g, b) },
+      uOpacity: { value: 0.65 },
+      uGlow:    { value: 0.0 },
+      uTime:    { value: 0.0 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uTexture;
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uGlow;
+      uniform float uTime;
+      varying vec2 vUv;
+
+      void main() {
+        vec4 tex = texture2D(uTexture, vUv);
+        float faceMask = tex.a;
+
+        // Base colored fill
+        vec3 base = uColor * 0.25;
+
+        // Face mesh overlay
+        vec3 faceColor = tex.rgb;
+        vec3 col = mix(base, faceColor, faceMask * 0.7);
+
+        // Pulsing edge glow
+        float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+        float edge = smoothstep(0.0, 0.15, edgeDist);
+        float pulse = 0.5 + 0.5 * sin(uTime * 2.0 + vUv.x * 3.14);
+        col += uColor * (1.0 - edge) * (0.5 + uGlow) * pulse;
+
+        // Glow halo
+        col += uColor * uGlow * 0.3;
+
+        float alpha = max(0.3, faceMask * 0.6) * uOpacity;
+        alpha += (1.0 - edge) * (0.3 + uGlow * 0.4);
+        alpha = clamp(alpha, 0.0, 0.95);
+
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 10;
+  quadGroup.add(mesh);
+  quads.push({ mesh, geo, mat });
+
+  // Connection line (top edge)
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const lineMat = new THREE.LineBasicMaterial({
+    color: new THREE.Color(r, g, b), transparent: true, opacity: 0.7,
+  });
+  const line = new THREE.LineSegments(lineGeo, lineMat);
+  line.renderOrder = 5;
+  quadGroup.add(line);
+  connectionLines.push({ line, geo: lineGeo });
+}
+
+// ─── Smoothing ──────────────────────────────────────────────────────────
+function smoothLandmarks(prev, curr, factor) {
+  if (!prev) return curr.map(p => ({...p}));
+  return curr.map((p, i) => ({
+    x: prev[i].x + (p.x - prev[i].x) * factor,
+    y: prev[i].y + (p.y - prev[i].y) * factor,
+    z: prev[i].z + (p.z - prev[i].z) * factor,
+  }));
+}
+
+// ─── MediaPipe: Hands ───────────────────────────────────────────────────
+let handsInstance = null;
 let faceMeshInstance = null;
+let modelsReady = 0;
 
-async function loadFaceMesh() {
+async function loadModels() {
+  // Hands
+  handsInstance = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
+  });
+  handsInstance.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.5,
+  });
+  handsInstance.onResults(onHandResults);
+
+  statusEl.textContent = 'Downloading hand model…';
+  const dummy = document.createElement('canvas');
+  dummy.width = 64; dummy.height = 48;
+  await handsInstance.send({ image: dummy });
+  modelsReady++;
+
+  // Face Mesh
   faceMeshInstance = new FaceMesh({
     locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`,
   });
@@ -103,23 +291,33 @@ async function loadFaceMesh() {
   });
   faceMeshInstance.onResults(onFaceResults);
 
-  // Pre-warm: send a blank frame to trigger model download
-  statusEl.textContent = 'Downloading model (≈2MB)…';
-  const dummyCanvas = document.createElement('canvas');
-  dummyCanvas.width = 64; dummyCanvas.height = 48;
-  await faceMeshInstance.send({ image: dummyCanvas });
-  statusEl.textContent = 'Model loaded!';
+  statusEl.textContent = 'Downloading face model…';
+  await faceMeshInstance.send({ image: dummy });
+  modelsReady++;
+
+  statusEl.textContent = 'Models loaded!';
   btnEl.style.display = 'block';
+}
+
+function onHandResults(results) {
+  // Sort hands by x position: left hand (right side of mirrored image) first
+  handData = results.multiHandLandmarks || [];
+  if (handData.length === 2) {
+    const cx0 = handData[0][9].x; // wrist center x
+    const cx1 = handData[1][9].x;
+    if (cx0 > cx1) { // mirrored: left hand appears on right
+      handData = [handData[1], handData[0]];
+    }
+  }
+  // Smooth
+  for (let h = 0; h < handData.length; h++) {
+    smoothHands[h] = smoothLandmarks(smoothHands[h], handData[h], 0.45);
+  }
 }
 
 function onFaceResults(results) {
   faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
-  if (!faceReady && faceLandmarks.length > 0) {
-    faceReady = true;
-    loadingEl.style.display = 'none';
-    hudEl.style.opacity = '1';
-    setTimeout(() => hudEl.style.opacity = '0', 3000);
-  }
+  drawFaceToCanvas();
 }
 
 // ─── Camera ─────────────────────────────────────────────────────────────
@@ -132,32 +330,158 @@ async function startCamera() {
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
-    const video = document.createElement('video');
-    video.srcObject = stream;
-    video.setAttribute('playsinline', '');
-    await video.play();
-    W = video.videoWidth  || 640;
-    H = video.videoHeight || 480;
+    videoEl.srcObject = stream;
+    await videoEl.play();
 
-    statusEl.textContent = `Camera ${W}×${H} — tracking…`;
+    const W = videoEl.videoWidth || 1280;
+    const H = videoEl.videoHeight || 720;
+    console.log(`Camera: ${W}×${H}`);
 
-    // Feed frames to MediaPipe
+    // Adjust aspect ratio for Three.js
+    const aspect = window.innerWidth / window.innerHeight;
+    const videoAspect = W / H;
+    if (videoAspect > aspect) {
+      camera.top = 1; camera.bottom = -1;
+      camera.left = -videoAspect / aspect;
+      camera.right =  videoAspect / aspect;
+    } else {
+      camera.left = -1; camera.right = 1;
+      camera.top  = aspect / videoAspect;
+      camera.bottom = -aspect / videoAspect;
+    }
+    camera.updateProjectionMatrix();
+
+    statusEl.textContent = 'Tracking…';
+
     async function loop() {
-      if (video.readyState >= 2) {
-        await faceMeshInstance.send({ image: video });
+      if (videoEl.readyState >= 2) {
+        if (handsInstance)       await handsInstance.send({ image: videoEl });
+        if (faceMeshInstance)    await faceMeshInstance.send({ image: videoEl });
       }
       requestAnimationFrame(loop);
     }
     loop();
 
-    // Hide loading once face detected
+    // Animate
+    let time = 0;
+    function animate() {
+      requestAnimationFrame(animate);
+      time += 0.016;
+      updateQuads(time);
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    loadingEl.style.display = 'none';
+    hudEl.style.opacity = '1';
+    setTimeout(() => hudEl.style.opacity = '0', 4000);
+
   } catch (err) {
-    statusEl.textContent = `Camera error: ${err.message}\nReload to retry.`;
+    statusEl.textContent = `Camera error: ${err.message}`;
     console.error(err);
   }
 }
 
-// ─── Face Triangulation (full 468-point mesh) ──────────────────────────
+// ─── Update Quads every frame ───────────────────────────────────────────
+const _tmpPos = new Float32Array(12);
+
+function updateQuads(time) {
+  const hands = smoothHands;
+
+  // Need at least 1 hand to show anything
+  if (!hands[0] && !hands[1]) {
+    quadGroup.visible = false;
+    return;
+  }
+  quadGroup.visible = true;
+
+  // If only one hand, mirror it for the other
+  const L = hands[0] || hands[1];
+  const R = hands[1] || hands[0];
+
+  // Global interaction: distance between hands
+  const handDist = hands[0] && hands[1]
+    ? Math.abs(hands[0][0].x - hands[1][0].x)
+    : 0.5;
+  const globalGlow = Math.max(0, 1 - handDist * 3);
+
+  for (let i = 0; i < QUAD_COUNT; i++) {
+    const tipTop = FINGER_TIPS[i];     // top edge fingertips
+    const tipBot = FINGER_TIPS[i + 1]; // bottom edge fingertips
+
+    const { mesh, geo, mat } = quads[i];
+    const { line, geo: lineGeo } = connectionLines[i];
+
+    // Corner positions in NDC
+    const lt = lmToNDC(L[tipTop]);  // left top
+    const rt = lmToNDC(R[tipTop]);  // right top
+    const rb = lmToNDC(R[tipBot]);  // right bottom
+    const lb = lmToNDC(L[tipBot]);  // left bottom
+
+    // Depth from average z
+    const avgZ = (L[tipTop].z + R[tipTop].z + L[tipBot].z + R[tipBot].z) / 4;
+    const depth = avgZ * 0.15;
+
+    // Interaction: finger curl (distance from fingertip to palm center)
+    const curlL = Math.hypot(L[tipTop].x - L[9].x, L[tipTop].y - L[9].y);
+    const curlR = Math.hypot(R[tipTop].x - R[9].x, R[tipTop].y - R[9].y);
+    const curl = (curlL + curlR) / 2;
+    const scale = 0.7 + curl * 1.2;
+
+    // Update quad vertices (with interaction deform)
+    const positions = geo.attributes.position.array;
+    const cx = (lt.x + rt.x + rb.x + lb.x) / 4;
+    const cy = (lt.y + rt.y + rb.y + lb.y) / 4;
+
+    function deform(pt) {
+      return {
+        x: cx + (pt.x - cx) * scale,
+        y: cy + (pt.y - cy) * scale,
+      };
+    }
+
+    const dlt = deform(lt), drt = deform(rt);
+    const drb = deform(rb), dlb = deform(lb);
+
+    positions[0] = dlt.x; positions[1]  = dlt.y; positions[2]  = depth;
+    positions[3] = drt.x; positions[4]  = drt.y; positions[5]  = depth;
+    positions[6] = drb.x; positions[7]  = drb.y; positions[8]  = depth;
+    positions[9] = dlb.x; positions[10] = dlb.y; positions[11] = depth;
+    geo.attributes.position.needsUpdate = true;
+    geo.computeVertexNormals();
+
+    // Update uniforms
+    mat.uniforms.uTime.value = time;
+    mat.uniforms.uGlow.value = globalGlow;
+
+    // Interaction: color hue shift based on hand distance
+    const [r, g, b] = QUAD_COLORS[i];
+    const hueShift = handDist * 0.3;
+    mat.uniforms.uColor.value.setRGB(
+      r + hueShift * 0.1,
+      g - hueShift * 0.05,
+      b - hueShift * 0.1,
+    );
+
+    // Update connection line (top and bottom edges)
+    const lp = lineGeo.attributes.position.array;
+    lp[0] = dlt.x; lp[1] = dlt.y; lp[2] = depth + 0.001;
+    lp[3] = drt.x; lp[4] = drt.y; lp[5] = depth + 0.001;
+    lineGeo.attributes.position.needsUpdate = true;
+  }
+}
+
+// ─── Landmark → NDC (mirrored selfie) ──────────────────────────────────
+function lmToNDC(lm) {
+  return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) };
+}
+
+// ─── Resize ─────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Face Mesh Triangulation (subset) ───────────────────────────────────
 const TRI = [
   127,34,139,11,0,37,232,231,120,72,37,39,128,121,47,232,121,128,
   104,69,67,175,171,148,157,158,133,245,128,114,163,7,144,245,236,54,
@@ -206,169 +530,27 @@ const TRI = [
   163,7,144,245,236,54,35,226,113,161,160,31,189,105,66,77,76,146,
   184,78,74,110,47,105,205,187,213,95,48,235,61,166,125,230,161,31,
   197,195,196,248,189,114,24,141,127,
-  // Extra coverage
-  126,127,34,34,139,127,127,34,126,127,227,34,34,227,234,234,227,120,
-  120,231,232,121,232,128,128,245,114,114,244,189,189,248,195,195,197,196,
-  196,3,197,197,196,3,3,196,142,142,196,156,156,22,145,145,156,22,
-  22,145,70,70,63,66,66,63,105,105,107,66,66,107,189,189,107,108,
-  108,107,9,9,107,10,10,107,151,151,107,66,66,105,63,63,70,66,
-  66,70,156,156,70,22,22,70,113,113,70,117,117,70,226,226,70,113,
-  113,226,35,35,226,113,113,117,226,226,117,70,226,247,113,113,247,226,
-  247,226,113,120,231,128,128,121,232,232,121,120,120,231,232,121,232,245,
-  245,232,236,236,245,54,54,236,245,245,236,232,232,231,120,120,231,232,
-  33,7,163,163,7,144,144,7,163,163,246,33,33,246,247,247,246,33,
-  33,247,100,100,247,101,101,247,117,117,247,226,226,247,113,113,247,246,
-  246,113,33,33,113,7,7,113,33,33,7,163,163,7,144,144,7,163,
-  163,145,7,7,145,163,1,2,19,19,2,94,94,2,204,204,2,98,
-  98,2,326,326,2,204,204,2,98,98,2,204,204,326,2,2,204,98,
+  126,127,34,34,139,127,127,227,34,34,227,234,234,227,120,120,231,232,
+  121,232,128,128,245,114,114,244,189,189,248,195,195,197,196,196,3,197,
+  3,196,142,142,196,156,156,22,145,22,145,70,70,63,66,66,63,105,
+  105,107,66,66,107,189,189,107,108,108,107,9,9,107,10,10,107,151,
+  33,7,163,163,7,144,163,246,33,33,246,247,247,246,33,33,247,100,
+  100,247,101,101,247,117,117,247,226,226,247,113,113,247,246,246,113,33,
+  33,113,7,1,2,19,19,2,94,94,2,204,204,2,98,98,2,326,
   0,11,12,12,11,13,13,11,14,14,11,15,15,11,16,16,11,17,
   17,11,18,18,11,200,200,11,199,199,11,175,200,199,175,175,199,171,
   171,199,148,148,199,176,176,199,175,148,176,149,149,176,150,150,176,152,
   152,176,171,171,176,148,116,117,118,118,117,119,119,117,120,120,117,121,
-  121,117,128,128,117,245,245,117,128,128,117,121,121,117,120,10,338,337,
-  337,338,336,336,338,335,335,338,334,334,338,333,333,338,332,332,338,331,
-  331,338,330,330,338,298,298,338,301,301,338,299,299,338,300,300,338,301,
-  301,338,298,298,338,330,330,338,331,331,338,332,332,338,333,333,338,334,
-  334,338,335,335,338,336,336,338,337,337,338,10,263,255,339,339,255,340,
-  340,255,341,341,255,342,342,255,254,254,255,253,253,255,252,252,255,256,
-  256,255,341,341,255,342,342,255,253,253,255,252,252,255,256,256,255,253,
-  253,255,254,254,255,253,253,255,252,252,255,256,256,255,341,341,255,342,
+  121,117,128,128,117,245,10,338,337,337,338,336,336,338,335,335,338,334,
+  334,338,333,333,338,332,332,338,331,331,338,330,330,338,298,298,338,301,
   46,53,63,63,53,105,105,53,66,66,53,107,107,53,108,108,53,9,
-  9,53,10,10,53,151,151,53,108,108,53,9,
+  9,53,10,10,53,151,263,255,339,339,255,340,340,255,341,341,255,342,
+  342,255,254,254,255,253,253,255,252,252,255,256,
 ];
 
-// ─── Landmark → NDC (screen coords) ────────────────────────────────────
-function lmToNDC(lm) {
-  // Mirror X for selfie view
-  return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1), z: -lm.z };
-}
-
-// ─── Build 3D Face Mesh (per mode) ─────────────────────────────────────
-let prevMesh = null;
-const [CR, CG, CB] = [COLOR[0]/255, COLOR[1]/255, COLOR[2]/255];
-
-function buildFaceMesh() {
-  // Clear previous
-  while (faceGroup.children.length > 0) {
-    const c = faceGroup.children[0];
-    if (c.geometry) c.geometry.dispose();
-    if (c.material) c.material.dispose();
-    faceGroup.remove(c);
-  }
-
-  if (faceLandmarks.length === 0) return;
-
-  const mode = modes[modeIdx];
-
-  if (mode === 'pointcloud') {
-    // ── Point Cloud ──
-    const positions = new Float32Array(faceLandmarks.length * 3);
-    for (let i = 0; i < faceLandmarks.length; i++) {
-      const p = lmToNDC(faceLandmarks[i]);
-      positions[i*3] = p.x; positions[i*3+1] = p.y; positions[i*3+2] = p.z * 0.3;
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.PointsMaterial({
-      size: POINT_SZ * 2, color: new THREE.Color(CR, CG, CB),
-      transparent: true, opacity: 0.9, depthTest: false,
-    });
-    faceGroup.add(new THREE.Points(geo, mat));
-
-  } else if (mode === 'wireframe' || mode === 'solid' || mode === 'glow') {
-    // ── Triangulated Mesh ──
-    const positions = new Float32Array(faceLandmarks.length * 3);
-    for (let i = 0; i < faceLandmarks.length; i++) {
-      const p = lmToNDC(faceLandmarks[i]);
-      positions[i*3] = p.x; positions[i*3+1] = p.y; positions[i*3+2] = p.z * 0.3;
-    }
-
-    const indices = [];
-    for (let i = 0; i < TRI.length; i += 3) {
-      const a = TRI[i], b = TRI[i+1], c = TRI[i+2];
-      if (a < faceLandmarks.length && b < faceLandmarks.length && c < faceLandmarks.length) {
-        indices.push(a, b, c);
-      }
-    }
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-
-    if (mode === 'solid') {
-      const mat = new THREE.MeshBasicMaterial({
-        color: new THREE.Color(CR * 0.4, CG * 0.4, CB * 0.4),
-        transparent: true, opacity: 0.6, side: THREE.DoubleSide,
-        depthTest: false,
-      });
-      faceGroup.add(new THREE.Mesh(geo, mat));
-
-      // Wireframe overlay
-      const wmat = new THREE.LineBasicMaterial({
-        color: new THREE.Color(CR, CG, CB), transparent: true, opacity: 0.5,
-      });
-      const wgeo = new THREE.WireframeGeometry(geo);
-      faceGroup.add(new THREE.LineSegments(wgeo, wmat));
-
-    } else if (mode === 'glow') {
-      // Layered glow effect
-      for (let layer = 3; layer >= 0; layer--) {
-        const scale = 1 + layer * 0.008;
-        const opacity = 0.15 + (3 - layer) * 0.2;
-        const mat = new THREE.MeshBasicMaterial({
-          color: new THREE.Color(CR, CG, CB),
-          transparent: true, opacity, side: THREE.DoubleSide,
-          depthTest: false, wireframe: layer > 0,
-        });
-        const mesh = new THREE.Mesh(geo.clone(), mat);
-        mesh.scale.set(scale, scale, scale);
-        faceGroup.add(mesh);
-      }
-
-    } else {
-      // Wireframe
-      const wgeo = new THREE.WireframeGeometry(geo);
-      const mat = new THREE.LineBasicMaterial({
-        color: new THREE.Color(CR, CG, CB), transparent: true, opacity: 0.7,
-      });
-      faceGroup.add(new THREE.LineSegments(wgeo, mat));
-
-      // Point overlay
-      const pmat = new THREE.PointsMaterial({
-        size: POINT_SZ, color: new THREE.Color(CR, CG, CB),
-        transparent: true, opacity: 0.5, depthTest: false,
-      });
-      const pgeo = new THREE.BufferGeometry();
-      pgeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      faceGroup.add(new THREE.Points(pgeo, pmat));
-    }
-  }
-}
-
-// ─── Mode Switch ────────────────────────────────────────────────────────
-modeBtnEl.addEventListener('click', () => {
-  modeIdx = (modeIdx + 1) % modes.length;
-  modeBtnEl.textContent = modes[modeIdx].toUpperCase();
-});
-modeBtnEl.textContent = modes[modeIdx].toUpperCase();
-
-// ─── Resize ─────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-
-// ─── Render Loop ────────────────────────────────────────────────────────
-function animate() {
-  requestAnimationFrame(animate);
-  buildFaceMesh();
-  renderer.render(scene, camera);
-}
-animate();
-
 // ─── Bootstrap ──────────────────────────────────────────────────────────
-loadFaceMesh().catch(err => {
-  statusEl.textContent = `Model load failed: ${err.message}\nCheck network and reload.`;
+loadModels().catch(err => {
+  statusEl.textContent = `Error: ${err.message}\nCheck network and reload.`;
   console.error(err);
 });
 </script>
