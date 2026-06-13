@@ -412,18 +412,19 @@ function updateQuads(time) {
     : 0.5;
   const globalGlow = Math.max(0, 1 - handDist * 3);
 
-  for (let i = 0; i < QUAD_COUNT; i++) {
-    const tipTop = FINGER_TIPS[i];     // top edge
-    const tipBot = FINGER_TIPS[i + 1]; // bottom edge
+  // Precompute ALL fingertip NDC positions (shared between adjacent quads)
+  const Ltips = FINGER_TIPS.map(idx => extendedTip(L, idx));
+  const Rtips = FINGER_TIPS.map(idx => extendedTip(R, idx));
 
+  for (let i = 0; i < QUAD_COUNT; i++) {
     const { mesh, geo, mat } = quads[i];
     const { line, geo: lineGeo } = connectionLines[i];
 
-    // Corner positions in NDC (extended to actual fingertip)
-    const lt = extendedTip(L, tipTop);  // left top
-    const rt = extendedTip(R, tipTop);  // right top
-    const rb = extendedTip(R, tipBot);  // right bottom
-    const lb = extendedTip(L, tipBot);  // left bottom
+    // Corner positions from precomputed arrays (shared edges = no gaps)
+    const lt = Ltips[i];      // left top
+    const rt = Rtips[i];      // right top
+    const rb = Rtips[i + 1];  // right bottom
+    const lb = Ltips[i + 1];  // left bottom
 
     // Validate: check each side length, merge short sides into triangle
     const distLT_RT = Math.hypot(lt.x - rt.x, lt.y - rt.y);
@@ -470,12 +471,12 @@ function updateQuads(time) {
     }
 
     // Depth from average z
-    const avgZ = (L[tipTop].z + R[tipTop].z + L[tipBot].z + R[tipBot].z) / 4;
+    const avgZ = (Ltips[i].z + Rtips[i].z + Ltips[i+1].z + Rtips[i+1].z) / 4 || 0;
     const depth = avgZ * 0.15;
 
     // Interaction: finger curl (distance from fingertip to palm center)
-    const curlL = Math.hypot(L[tipTop].x - L[9].x, L[tipTop].y - L[9].y);
-    const curlR = Math.hypot(R[tipTop].x - R[9].x, R[tipTop].y - R[9].y);
+    const curlL = Math.hypot(L[FINGER_TIPS[i]].x - L[9].x, L[FINGER_TIPS[i]].y - L[9].y);
+    const curlR = Math.hypot(R[FINGER_TIPS[i]].x - R[9].x, R[FINGER_TIPS[i]].y - R[9].y);
     const curl = (curlL + curlR) / 2;
     const scale = 0.7 + curl * 1.2;
 
@@ -527,16 +528,16 @@ function lmToNDC(lm) {
   return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) };
 }
 
-// ─── Extend fingertip outward (tip is at nail base, not actual tip) ─────
+// ─── Extend fingertip INWARD toward palm (covers finger body) ───────────
 const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 }; // tip→MCP joint mapping
 function extendedTip(landmarks, tipIdx) {
   const tip = landmarks[tipIdx];
   const mcp = landmarks[FINGER_MCP[tipIdx]];
   if (!mcp) return lmToNDC(tip);
-  // Direction from MCP toward tip, extend 40% further
+  // Direction from MCP toward tip, go 30% PAST MCP (inward toward palm)
   const dx = tip.x - mcp.x;
   const dy = tip.y - mcp.y;
-  const ext = { x: tip.x + dx * 0.4, y: tip.y + dy * 0.4, z: tip.z };
+  const ext = { x: tip.x - dx * 0.3, y: tip.y - dy * 0.3, z: tip.z };
   return lmToNDC(ext);
 }
 
