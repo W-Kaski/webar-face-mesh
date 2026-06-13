@@ -61,11 +61,12 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 const QUAD_COUNT = 4;
 const FINGER_TIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky
 const QUAD_COLORS = [
-  [0.20, 0.50, 0.95],  // blue   (thumb↔index)
-  [0.20, 0.85, 0.40],  // green  (index↔middle)
-  [0.95, 0.30, 0.25],  // red    (middle↔ring)
-  [0.95, 0.30, 0.25],  // red    (ring↔pinky)
+  [0.96, 0.98, 0.93],
+  [0.98, 0.98, 0.95],
+  [0.96, 0.98, 0.93],
+  [0.98, 0.98, 0.95],
 ];
+const STRIP_OPACITY = 0.94;
 
 // ─── State ──────────────────────────────────────────────────────────────
 let handData = [];          // [{landmarks: 21 points}, {landmarks: 21 points}]
@@ -99,14 +100,114 @@ const faceTexture = new THREE.CanvasTexture(faceCanvas);
 faceTexture.minFilter = THREE.LinearFilter;
 faceTexture.magFilter = THREE.LinearFilter;
 
-// Draw face mesh onto canvas
-function drawFaceToCanvas() {
-  faceCtx.fillStyle = '#111';
-  faceCtx.fillRect(0, 0, 512, 512);
-  if (faceLandmarks.length === 0) return;
+function ellipseContains(x, y, cx, cy, rx, ry) {
+  const dx = (x - cx) / rx;
+  const dy = (y - cy) / ry;
+  return dx * dx + dy * dy <= 1;
+}
 
+function drawPaperGrain() {
+  faceCtx.fillStyle = '#f8f9ef';
+  faceCtx.fillRect(0, 0, 512, 512);
+
+  faceCtx.globalAlpha = 0.16;
+  for (let y = 0; y < 512; y += 9) {
+    faceCtx.fillStyle = y % 18 === 0 ? '#d9ddcf' : '#ffffff';
+    faceCtx.fillRect(0, y, 512, 1);
+  }
+  faceCtx.globalAlpha = 1;
+}
+
+function drawAccentBands(timeSeed) {
+  faceCtx.save();
+  faceCtx.globalAlpha = 0.98;
+
+  faceCtx.fillStyle = '#00a62a';
+  faceCtx.beginPath();
+  faceCtx.moveTo(36, 0);
+  faceCtx.lineTo(145, 0);
+  faceCtx.bezierCurveTo(127, 76, 150, 142, 105, 203);
+  faceCtx.bezierCurveTo(73, 247, 82, 311, 118, 368);
+  faceCtx.lineTo(22, 512);
+  faceCtx.lineTo(0, 512);
+  faceCtx.lineTo(0, 0);
+  faceCtx.closePath();
+  faceCtx.fill();
+
+  faceCtx.fillStyle = '#00a62a';
+  faceCtx.fillRect(184, 0, 156, 72);
+  faceCtx.beginPath();
+  faceCtx.moveTo(314, 282);
+  faceCtx.bezierCurveTo(390, 235, 423, 286, 512, 243);
+  faceCtx.lineTo(512, 426);
+  faceCtx.bezierCurveTo(437, 454, 376, 422, 310, 457);
+  faceCtx.closePath();
+  faceCtx.fill();
+
+  faceCtx.fillStyle = '#0e4364';
+  faceCtx.beginPath();
+  faceCtx.moveTo(0, 430);
+  faceCtx.lineTo(512, 116);
+  faceCtx.lineTo(512, 178);
+  faceCtx.lineTo(0, 488);
+  faceCtx.closePath();
+  faceCtx.fill();
+
+  faceCtx.globalAlpha = 0.9;
+  faceCtx.strokeStyle = '#b83a46';
+  faceCtx.lineWidth = 2;
+  faceCtx.beginPath();
+  faceCtx.moveTo(0, 120 + Math.sin(timeSeed) * 8);
+  faceCtx.bezierCurveTo(130, 95, 232, 155, 512, 102);
+  faceCtx.stroke();
+
+  faceCtx.restore();
+}
+
+function drawHalftoneFace(xMin, yMin, xMax, yMax) {
   const S = 512;
-  // Find bounding box
+  const fw = xMax - xMin;
+  const fh = yMax - yMin;
+  const cx = ((xMin + xMax) * 0.5) * S;
+  const cy = ((yMin + yMax) * 0.5) * S;
+  const rx = Math.max(68, fw * S * 0.58);
+  const ry = Math.max(94, fh * S * 0.64);
+  const step = 8;
+
+  faceCtx.fillStyle = '#bd1730';
+  for (let y = Math.max(0, cy - ry - 28); y <= Math.min(S, cy + ry + 28); y += step) {
+    for (let x = Math.max(0, cx - rx - 28); x <= Math.min(S, cx + rx + 28); x += step) {
+      const inHead = ellipseContains(x, y, cx, cy, rx, ry);
+      const sideShadow = ellipseContains(x, y, cx - rx * 0.38, cy + ry * 0.04, rx * 0.42, ry * 0.88);
+      const hairMass = ellipseContains(x, y, cx, cy - ry * 0.62, rx * 0.9, ry * 0.28);
+      const cheek = ellipseContains(x, y, cx + rx * 0.35, cy + ry * 0.18, rx * 0.28, ry * 0.42);
+      const eyeCut = ellipseContains(x, y, cx + rx * 0.05, cy - ry * 0.16, rx * 0.33, ry * 0.11);
+      const faceGap = ellipseContains(x, y, cx + rx * 0.12, cy + ry * 0.12, rx * 0.24, ry * 0.38);
+      if ((!inHead && !sideShadow && !hairMass && !cheek) || eyeCut || faceGap) continue;
+
+      const dx = Math.abs((x - cx) / rx);
+      const dy = Math.abs((y - cy) / ry);
+      const tone = Math.max(0.2, 1.0 - (dx * 0.35 + dy * 0.28));
+      const r = 1.2 + tone * 2.25;
+      faceCtx.globalAlpha = 0.92 - Math.min(0.48, dx * 0.38 + dy * 0.18);
+      faceCtx.beginPath();
+      faceCtx.arc(x, y, r, 0, Math.PI * 2);
+      faceCtx.fill();
+    }
+  }
+  faceCtx.globalAlpha = 1;
+}
+
+// Draw a high-contrast print texture driven by the detected face bounds.
+function drawFaceToCanvas() {
+  drawPaperGrain();
+  drawAccentBands(faceLandmarks.length);
+  if (faceLandmarks.length === 0) {
+    faceTexture.needsUpdate = true;
+    faceTextureReady = true;
+    return;
+  }
+
   let xMin=1, yMin=1, xMax=0, yMax=0;
   for (const lm of faceLandmarks) {
     if (lm.x < xMin) xMin = lm.x;
@@ -114,39 +215,9 @@ function drawFaceToCanvas() {
     if (lm.y < yMin) yMin = lm.y;
     if (lm.y > yMax) yMax = lm.y;
   }
-  const pad = 0.05;
+  const pad = 0.03;
   xMin -= pad; yMin -= pad; xMax += pad; yMax += pad;
-  const fw = xMax - xMin, fh = yMax - yMin;
-  const scale = Math.min(0.9 / fw, 0.9 / fh) * S;
-  const ox = (S - fw * scale) / 2;
-  const oy = (S - fh * scale) / 2;
-
-  function tx(lm) { return ox + (lm.x - xMin) * scale; }
-  function ty(lm) { return oy + (lm.y - yMin) * scale; }
-
-  // Triangulated fill
-  faceCtx.lineWidth = 1;
-  faceCtx.strokeStyle = 'rgba(100,255,218,0.3)';
-  faceCtx.fillStyle   = 'rgba(100,255,218,0.05)';
-  for (let i = 0; i < TRI.length; i += 3) {
-    const a = faceLandmarks[TRI[i]], b = faceLandmarks[TRI[i+1]], c = faceLandmarks[TRI[i+2]];
-    if (!a||!b||!c) continue;
-    faceCtx.beginPath();
-    faceCtx.moveTo(tx(a), ty(a));
-    faceCtx.lineTo(tx(b), ty(b));
-    faceCtx.lineTo(tx(c), ty(c));
-    faceCtx.closePath();
-    faceCtx.fill();
-    faceCtx.stroke();
-  }
-
-  // Points
-  faceCtx.fillStyle = 'rgba(100,255,218,0.8)';
-  for (const lm of faceLandmarks) {
-    faceCtx.beginPath();
-    faceCtx.arc(tx(lm), ty(lm), 1.5, 0, Math.PI * 2);
-    faceCtx.fill();
-  }
+  drawHalftoneFace(xMin, yMin, xMax, yMax);
 
   faceTexture.needsUpdate = true;
   faceTextureReady = true;
@@ -180,9 +251,11 @@ for (let i = 0; i < QUAD_COUNT; i++) {
     uniforms: {
       uTexture: { value: faceTexture },
       uColor:   { value: new THREE.Color(r, g, b) },
-      uOpacity: { value: 0.65 },
+      uOpacity: { value: STRIP_OPACITY },
       uGlow:    { value: 0.0 },
       uTime:    { value: 0.0 },
+      uPanelIndex: { value: i },
+      uPanelCount: { value: QUAD_COUNT },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -197,31 +270,29 @@ for (let i = 0; i < QUAD_COUNT; i++) {
       uniform float uOpacity;
       uniform float uGlow;
       uniform float uTime;
+      uniform float uPanelIndex;
+      uniform float uPanelCount;
       varying vec2 vUv;
 
       void main() {
-        vec4 tex = texture2D(uTexture, vUv);
-        float faceMask = tex.a;
+        vec2 stripUv = vec2(vUv.x, 1.0 - ((uPanelIndex + (1.0 - vUv.y)) / uPanelCount));
+        vec4 tex = texture2D(uTexture, stripUv);
 
-        // Base colored fill
-        vec3 base = uColor * 0.25;
+        vec3 paper = mix(uColor, tex.rgb, 0.92);
+        vec3 col = paper;
 
-        // Face mesh overlay
-        vec3 faceColor = tex.rgb;
-        vec3 col = mix(base, faceColor, faceMask * 0.7);
-
-        // Pulsing edge glow
         float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-        float edge = smoothstep(0.0, 0.15, edgeDist);
-        float pulse = 0.5 + 0.5 * sin(uTime * 2.0 + vUv.x * 3.14);
-        col += uColor * (1.0 - edge) * (0.5 + uGlow) * pulse;
+        float edge = 1.0 - smoothstep(0.0, 0.024, edgeDist);
+        vec3 warmEdge = vec3(0.58, 0.06, 0.12);
+        vec3 coolEdge = vec3(0.08, 0.18, 0.54);
+        col = mix(col, mix(warmEdge, coolEdge, step(0.5, vUv.x)), edge * 0.72);
 
-        // Glow halo
-        col += uColor * uGlow * 0.3;
+        float crease = smoothstep(0.012, 0.0, abs(vUv.y - 1.0));
+        float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + stripUv.x * 8.0);
+        col += vec3(0.04, 0.12, 0.18) * crease * 0.35;
+        col += vec3(0.0, 0.55, 0.12) * uGlow * 0.12 * pulse;
 
-        float alpha = max(0.3, faceMask * 0.6) * uOpacity;
-        alpha += (1.0 - edge) * (0.3 + uGlow * 0.4);
-        alpha = clamp(alpha, 0.0, 0.95);
+        float alpha = clamp(uOpacity + edge * 0.04, 0.0, 0.98);
 
         gl_FragColor = vec4(col, alpha);
       }
@@ -237,7 +308,7 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   const lineGeo = new THREE.BufferGeometry();
   lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
   const lineMat = new THREE.LineBasicMaterial({
-    color: new THREE.Color(r, g, b), transparent: true, opacity: 0.7,
+    color: new THREE.Color(i % 2 ? 0x244a7a : 0xb51a2d), transparent: true, opacity: 0.86,
   });
   const line = new THREE.LineSegments(lineGeo, lineMat);
   line.renderOrder = 5;
@@ -300,27 +371,24 @@ async function loadModels() {
 }
 
 function onHandResults(results) {
-  // Sort hands by x position: left hand (right side of mirrored image) first
-  const raw = results.multiHandLandmarks || [];
-
-  // Clear stale data every frame
-  smoothHands = [null, null];
+  const raw = (results.multiHandLandmarks || []).slice();
 
   if (raw.length === 0) {
     handData = [];
+    smoothHands = [null, null];
     return;
   }
 
   if (raw.length === 2) {
-    const cx0 = raw[0][9].x;
-    const cx1 = raw[1][9].x;
-    if (cx0 > cx1) { raw.reverse(); }
+    raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
   }
 
   handData = raw;
+  const nextSmooth = [null, null];
   for (let h = 0; h < handData.length; h++) {
-    smoothHands[h] = smoothLandmarks(smoothHands[h], handData[h], 0.7);
+    nextSmooth[h] = smoothLandmarks(smoothHands[h], handData[h], 0.42);
   }
+  smoothHands = nextSmooth;
 }
 
 function onFaceResults(results) {
@@ -396,7 +464,6 @@ const _tmpPos = new Float32Array(12);
 function updateQuads(time) {
   const hands = smoothHands;
 
-  // Need BOTH hands to show quads
   if (!hands[0] || !hands[1]) {
     quadGroup.visible = false;
     return;
@@ -406,15 +473,11 @@ function updateQuads(time) {
   const L = hands[0];
   const R = hands[1];
 
-  // Global interaction: distance between hands
-  const handDist = hands[0] && hands[1]
-    ? Math.abs(hands[0][0].x - hands[1][0].x)
-    : 0.5;
-  const globalGlow = Math.max(0, 1 - handDist * 3);
+  const wristGap = Math.abs(lmToNDC(L[0]).x - lmToNDC(R[0]).x);
+  const globalGlow = Math.max(0, 1 - wristGap * 1.2);
 
-  // Precompute ALL fingertip NDC positions (shared between adjacent quads)
-  const Ltips = FINGER_TIPS.map(idx => extendedTip(L, idx));
-  const Rtips = FINGER_TIPS.map(idx => extendedTip(R, idx));
+  const Ltips = FINGER_TIPS.map(idx => ribbonAnchor(L, idx, -1));
+  const Rtips = FINGER_TIPS.map(idx => ribbonAnchor(R, idx, 1));
 
   for (let i = 0; i < QUAD_COUNT; i++) {
     const { mesh, geo, mat } = quads[i];
@@ -426,19 +489,17 @@ function updateQuads(time) {
     const rb = Rtips[i + 1];  // right bottom
     const lb = Ltips[i + 1];  // left bottom
 
-    // Validate: check each side length, merge short sides into triangle
     const distLT_RT = Math.hypot(lt.x - rt.x, lt.y - rt.y);
     const distLB_RB = Math.hypot(lb.x - rb.x, lb.y - rb.y);
     const distLT_LB = Math.hypot(lt.x - lb.x, lt.y - lb.y);
     const distRT_RB = Math.hypot(rt.x - rb.x, rt.y - rb.y);
 
-    const MERGE_THRESHOLD = 0.06;
-    const mergeTop  = distLT_RT < MERGE_THRESHOLD; // top corners collapse
-    const mergeBot  = distLB_RB < MERGE_THRESHOLD; // bottom corners collapse
-    const mergeLeft = distLT_LB < MERGE_THRESHOLD; // left corners collapse
-    const mergeRight= distRT_RB < MERGE_THRESHOLD; // right corners collapse
+    const MERGE_THRESHOLD = 0.045;
+    const mergeTop  = distLT_RT < MERGE_THRESHOLD;
+    const mergeBot  = distLB_RB < MERGE_THRESHOLD;
+    const mergeLeft = distLT_LB < MERGE_THRESHOLD;
+    const mergeRight= distRT_RB < MERGE_THRESHOLD;
 
-    // Hide if completely degenerate (3+ corners merged)
     const mergeCount = [mergeTop, mergeBot, mergeLeft, mergeRight].filter(Boolean).length;
     if (mergeCount >= 3) {
       mesh.visible = false;
@@ -448,77 +509,43 @@ function updateQuads(time) {
     mesh.visible = true;
     line.visible = true;
 
-    // Build vertex list (4 corners or triangle)
     let verts;
     if (mergeTop) {
-      // Merge lt+rt → triangle (top, rb, lb)
       const top = { x: (lt.x+rt.x)/2, y: (lt.y+rt.y)/2 };
-      verts = [top, rb, lb, top]; // duplicate last for quad index reuse
+      verts = [top, rb, lb, top];
     } else if (mergeBot) {
-      // Merge lb+rb → triangle (lt, rt, bot)
       const bot = { x: (lb.x+rb.x)/2, y: (lb.y+rb.y)/2 };
       verts = [lt, rt, bot, bot];
     } else if (mergeLeft) {
-      // Merge lt+lb → triangle (left, rt, rb)
       const left = { x: (lt.x+lb.x)/2, y: (lt.y+lb.y)/2 };
       verts = [left, rt, rb, left];
     } else if (mergeRight) {
-      // Merge rt+rb → triangle (lt, right, lb)
       const right = { x: (rt.x+rb.x)/2, y: (rt.y+rb.y)/2 };
       verts = [lt, right, right, lb];
     } else {
       verts = [lt, rt, rb, lb];
     }
 
-    // Depth from average z
     const avgZ = (Ltips[i].z + Rtips[i].z + Ltips[i+1].z + Rtips[i+1].z) / 4 || 0;
     const depth = avgZ * 0.15;
 
-    // Interaction: finger curl (distance from fingertip to palm center)
-    const curlL = Math.hypot(L[FINGER_TIPS[i]].x - L[9].x, L[FINGER_TIPS[i]].y - L[9].y);
-    const curlR = Math.hypot(R[FINGER_TIPS[i]].x - R[9].x, R[FINGER_TIPS[i]].y - R[9].y);
-    const curl = (curlL + curlR) / 2;
-    const scale = 0.7 + curl * 1.2;
-
-    // Update quad vertices (with interaction deform)
     const positions = geo.attributes.position.array;
-    const cx = (verts[0].x + verts[1].x + verts[2].x + verts[3].x) / 4;
-    const cy = (verts[0].y + verts[1].y + verts[2].y + verts[3].y) / 4;
-
-    function deform(pt) {
-      return {
-        x: cx + (pt.x - cx) * scale,
-        y: cy + (pt.y - cy) * scale,
-      };
-    }
 
     for (let v = 0; v < 4; v++) {
-      const d = deform(verts[v]);
-      positions[v*3] = d.x; positions[v*3+1] = d.y; positions[v*3+2] = depth;
+      positions[v*3] = verts[v].x;
+      positions[v*3+1] = verts[v].y;
+      positions[v*3+2] = depth;
     }
 
     geo.attributes.position.needsUpdate = true;
     geo.computeVertexNormals();
 
-    // Update uniforms
     mat.uniforms.uTime.value = time;
     mat.uniforms.uGlow.value = globalGlow;
 
-    // Interaction: color hue shift based on hand distance
-    const [r, g, b] = QUAD_COLORS[i];
-    const hueShift = handDist * 0.3;
-    mat.uniforms.uColor.value.setRGB(
-      r + hueShift * 0.1,
-      g - hueShift * 0.05,
-      b - hueShift * 0.1,
-    );
-
-    // Update connection line (top edge)
     const lp = lineGeo.attributes.position.array;
-    const d0 = deform(verts[0]);
-    const d1 = deform(verts[1]);
-    lp[0] = d0.x; lp[1] = d0.y; lp[2] = depth + 0.001;
-    lp[3] = d1.x; lp[4] = d1.y; lp[5] = depth + 0.001;
+    lp[0] = verts[0].x; lp[1] = verts[0].y; lp[2] = depth + 0.001;
+    lp[3] = verts[1].x; lp[4] = verts[1].y; lp[5] = depth + 0.001;
     lineGeo.attributes.position.needsUpdate = true;
   }
 }
@@ -530,6 +557,33 @@ function lmToNDC(lm) {
 
 // ─── Extend fingertip INWARD toward palm (covers finger body) ───────────
 const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 }; // tip→MCP joint mapping
+const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
+
+function ribbonAnchor(landmarks, tipIdx, handSide) {
+  const tip = landmarks[tipIdx];
+  const mcp = landmarks[FINGER_MCP[tipIdx]];
+  const pip = landmarks[FINGER_PIP[tipIdx]] || mcp;
+  if (!mcp || !pip) return lmToNDC(tip);
+
+  const towardPalm = tipIdx === 4 ? 0.2 : 0.14;
+  const x = tip.x + (mcp.x - tip.x) * towardPalm;
+  const y = tip.y + (mcp.y - tip.y) * towardPalm;
+  const z = tip.z + (pip.z - tip.z) * 0.25;
+
+  const ndc = lmToNDC({ x, y, z });
+  const palm = lmToNDC(landmarks[9]);
+  const spread = tipIdx === 4 || tipIdx === 20 ? 0.045 : 0.02;
+  const dx = ndc.x - palm.x;
+  const dy = ndc.y - palm.y;
+  const len = Math.hypot(dx, dy) || 1;
+
+  return {
+    x: ndc.x + (dx / len) * spread + handSide * 0.006,
+    y: ndc.y + (dy / len) * spread,
+    z,
+  };
+}
+
 function extendedTip(landmarks, tipIdx) {
   const tip = landmarks[tipIdx];
   const mcp = landmarks[FINGER_MCP[tipIdx]];
