@@ -358,21 +358,25 @@ async function startCamera() {
     function render() {
       const currentMask = maskTexture || DUMMY_MASK;
 
-      // Step 1: Clear stencil + render camera background
+      // Step 1: Render ONLY camera background (hide stencil quads + effect passes)
+      quadGroup.visible = false;
+      for (const ep of effectPasses) ep.mesh.visible = false;
       renderer.clear(true, true, true);
       renderer.render(scene, camera);
 
-      // Step 2: Grab screen → grabTexture
+      // Step 2: Grab clean camera background
       grabScreen();
 
-      // Step 3: Update effect pass uniforms
+      // Step 3: Show stencil quads + effect passes, update uniforms
+      updateQuads();
       for (const ep of effectPasses) {
+        ep.mesh.visible = true;
         ep.mat.uniforms.uGrab.value = grabTexture;
         ep.mat.uniforms.uMask.value = currentMask;
         ep.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
       }
 
-      // Step 4: Render stencil quads + effect passes
+      // Step 4: Render full scene (camera + stencil quads + effect passes)
       renderer.render(scene, camera);
 
       requestAnimationFrame(render);
