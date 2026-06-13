@@ -281,9 +281,11 @@ async function startCamera() {
     videoTexture.magFilter = THREE.LinearFilter;
     videoTexture.generateMipmaps = false;
 
-    // Set video texture on all quads
+    // Set video texture on shader materials (fallback materials don't have uniforms)
     for (const q of quads) {
-      q.mat.uniforms.uVideo.value = videoTexture;
+      if (q.shaderMat && q.shaderMat.uniforms && q.shaderMat.uniforms.uVideo) {
+        q.shaderMat.uniforms.uVideo.value = videoTexture;
+      }
     }
 
     const W = videoEl.videoWidth || 1280;
