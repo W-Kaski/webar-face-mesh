@@ -301,15 +301,23 @@ async function loadModels() {
 
 function onHandResults(results) {
   // Sort hands by x position: left hand (right side of mirrored image) first
-  handData = results.multiHandLandmarks || [];
-  if (handData.length === 2) {
-    const cx0 = handData[0][9].x; // wrist center x
-    const cx1 = handData[1][9].x;
-    if (cx0 > cx1) { // mirrored: left hand appears on right
-      handData = [handData[1], handData[0]];
-    }
+  const raw = results.multiHandLandmarks || [];
+
+  // Clear stale data every frame
+  smoothHands = [null, null];
+
+  if (raw.length === 0) {
+    handData = [];
+    return;
   }
-  // Smooth
+
+  if (raw.length === 2) {
+    const cx0 = raw[0][9].x;
+    const cx1 = raw[1][9].x;
+    if (cx0 > cx1) { raw.reverse(); }
+  }
+
+  handData = raw;
   for (let h = 0; h < handData.length; h++) {
     smoothHands[h] = smoothLandmarks(smoothHands[h], handData[h], 0.7);
   }
@@ -411,11 +419,11 @@ function updateQuads(time) {
     const { mesh, geo, mat } = quads[i];
     const { line, geo: lineGeo } = connectionLines[i];
 
-    // Corner positions in NDC
-    const lt = lmToNDC(L[tipTop]);  // left top
-    const rt = lmToNDC(R[tipTop]);  // right top
-    const rb = lmToNDC(R[tipBot]);  // right bottom
-    const lb = lmToNDC(L[tipBot]);  // left bottom
+    // Corner positions in NDC (extended to actual fingertip)
+    const lt = extendedTip(L, tipTop);  // left top
+    const rt = extendedTip(R, tipTop);  // right top
+    const rb = extendedTip(R, tipBot);  // right bottom
+    const lb = extendedTip(L, tipBot);  // left bottom
 
     // Validate: check each side length, merge short sides into triangle
     const distLT_RT = Math.hypot(lt.x - rt.x, lt.y - rt.y);
@@ -517,6 +525,19 @@ function updateQuads(time) {
 // ─── Landmark → NDC (mirrored selfie) ──────────────────────────────────
 function lmToNDC(lm) {
   return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) };
+}
+
+// ─── Extend fingertip outward (tip is at nail base, not actual tip) ─────
+const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 }; // tip→MCP joint mapping
+function extendedTip(landmarks, tipIdx) {
+  const tip = landmarks[tipIdx];
+  const mcp = landmarks[FINGER_MCP[tipIdx]];
+  if (!mcp) return lmToNDC(tip);
+  // Direction from MCP toward tip, extend 40% further
+  const dx = tip.x - mcp.x;
+  const dy = tip.y - mcp.y;
+  const ext = { x: tip.x + dx * 0.4, y: tip.y + dy * 0.4, z: tip.z };
+  return lmToNDC(ext);
 }
 
 // ─── Resize ─────────────────────────────────────────────────────────────
