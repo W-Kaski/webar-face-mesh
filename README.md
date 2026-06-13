@@ -1,22 +1,21 @@
 # Hand Quad AR
 
-实时双手追踪 + 手指间连续透视纸带 + 人物剪影驱动的三材料印刷纹理。
+实时双手追踪 + 手指间透视四边形 + 人物特效视窗。
 
 ## 效果
 
-双手伸开手指 → 相邻手指间出现连续纸带面片，每个面片由左右手对应手指锚定。纸带使用三种材料：拇指到食指是红色半调点阵，食指到中指是蓝色油墨纹理，中指到小指是连续红色半调纹理。人物分割 mask 和 Face Mesh 脸部范围共同驱动剪影/脸部阴影。手指弯曲/靠近时面片自动退化为三角形。只有一只手时隐藏所有面片。
+双手伸开手指 → 相邻手指间出现透视四边形，四边形作为"特效视窗"，透过它看到摄像头画面中的人物区域叠加不同特效。
 
 ```
 左手                                              右手
   👆thumb══════════════════════════════thumb👆
-    ║        蓝色四边形 (thumb↔index)     ║
+    ║  Quad1: 人物区域红色粗描边（白底）  ║
   👆index══════════════════════════════index👆
-    ║        绿色四边形 (index↔middle)    ║
+    ║  Quad2: 人物区域白色剪影（蓝底）   ║
   👆middle══════════════════════════════middle👆
-    ║        红色四边形 (middle↔ring)     ║
-  👆ring════════════════════════════════ring👆
-    ║        红色四边形 (ring↔pinky)      ║
+    ║  Quad3: 人物区域绿色粗描边（白底）  ║
   👆pinky═══════════════════════════════pinky👆
+  (ring finger 不参与)
 ```
 
 ## 技术栈
@@ -24,17 +23,31 @@
 | 组件 | 作用 |
 |---|---|
 | [MediaPipe Hands](https://google.github.io/mediapipe/solutions/hands.html) | 双手 21 点实时追踪 |
-| [MediaPipe Face Mesh](https://google.github.io/mediapipe/solutions/face_mesh.html) | 468 点人脸检测，驱动半调头像纹理 |
-| [MediaPipe Selfie Segmentation](https://google.github.io/mediapipe/solutions/selfie_segmentation.html) | 生成人物剪影 mask |
-| [Three.js](https://threejs.org/) | 3D 渲染，连续四边形/三角形纸带 + 自定义 Shader |
+| [MediaPipe SelfieSegmentation](https://google.github.io/mediapipe/solutions/selfie_segmentation.html) | 人物/背景像素级分割 |
+| [MediaPipe Face Mesh](https://google.github.io/mediapipe/solutions/face_mesh.html) | 人脸 468 点检测 |
+| [Three.js](https://threejs.org/) | WebGL 渲染，自定义 Shader 实时合成 |
+
+## 原理
+
+```
+摄像头画面
+  ├─ MediaPipe Hands → 双手 landmark → 计算四边形四个角的位置
+  ├─ MediaPipe SelfieSegmentation → 人物 mask（每 5 帧更新）
+  └─ Three.js Shader:
+       videoTexture + maskTexture 传入 GPU
+       每个像素：
+         mask < 0.2 → 显示底色（白/蓝/白）
+         mask > 0.2 且是边缘 → 显示对应颜色描边（红/绿）
+         mask > 0.2 且是内部 → 白色填充（仅 Quad2）
+       所有计算在 GPU 完成，无 CPU 像素遍历
+```
 
 ## 交互
 
-- 手指伸展/旋转 → 纸带跟随对应手指形成透视梯形
-- 双手靠近 → 绿色辉光增强
-- 手指太近（退化） → 四边形自动变为三角形
+- 手指伸展 → 四边形跟随手指形成透视梯形
+- 手指弯曲/靠近 → 四边形退化为三角形
 - 单手 → 所有四边形隐藏
-- 红色材料在无名指轨道附近保留留白，避免每个手指缝重复点阵
+- 人物遮挡区域自动显示对应特效
 
 ## 本地运行
 
@@ -61,18 +74,9 @@ webar-face-mesh/
 └── README.md
 ```
 
-## 原理
+## 性能优化
 
-```
-摄像头画面
-  ├─ MediaPipe Hands → 双手各 21 个 landmark（归一化坐标）
-  ├─ MediaPipe Face Mesh → 468 个人脸 landmark → 绘制到 Canvas 纹理
-  └─ Three.js 渲染：
-       1. 将指尖 landmark 转换为 NDC 坐标（镜像翻转）
-       2. 沿手指方向向内延伸 30%（覆盖手指主体）
-       3. 预计算所有指尖位置（相邻四边形共享边 = 无缝拼接）
-       4. 检测退化：对角线 < 阈值 → 合并顶点为三角形
-       5. Selfie Segmentation 生成前景 mask，Face Mesh 提供脸部 bounds
-       6. 三个 CanvasTexture 分别生成红色半调、蓝色油墨、下半段红色半调
-       7. Shader 将纹理贴到对应手指面；中指→小指共享同一张红色纹理并用 UV 偏移保持连续
-```
+- Hands: 每帧推理（modelComplexity=0）
+- FaceMesh: 每 3 帧推理
+- SelfieSegmentation: 每 5 帧推理
+- Shader: GPU 实时合成，无 CPU 像素操作
