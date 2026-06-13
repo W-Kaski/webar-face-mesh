@@ -34,18 +34,16 @@ body{overflow:hidden;background:#000;font-family:system-ui}
 // ─── Config ─────────────────────────────────────────────────────────────
 const QUAD_COUNT = 3;
 const FINGER_TIPS = [4, 8, 12, 20]; // thumb, index, middle, pinky (skip ring)
-const EFFECT_TYPES = ['redOutline', 'whiteSilhouette', 'greenOutline'];
-const TEX_SIZE = 256;
 const SMOOTHING = 0.42;
 
 // ─── State ──────────────────────────────────────────────────────────────
-let handData = [];
-let faceLandmarks = [];
 let smoothHands = [null, null];
-let personMaskData = null;
 let segmentationInstance = null;
 let handsInstance = null;
 let faceMeshInstance = null;
+let videoTexture = null;
+let maskTexture = null;
+let hasMask = false;
 
 // ─── DOM ────────────────────────────────────────────────────────────────
 const videoEl = document.getElementById('video');
@@ -63,96 +61,94 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000000, 0);
 
-// ─── Shared Effect Canvas (video + mask compositing) ────────────────────
-const effectCanvas = document.createElement('canvas');
-effectCanvas.width = TEX_SIZE;
-effectCanvas.height = TEX_SIZE;
-const effectCtx = effectCanvas.getContext('2d', { willReadFrequently: true });
-const effectTexture = new THREE.CanvasTexture(effectCanvas);
-effectTexture.minFilter = THREE.LinearFilter;
-effectTexture.magFilter = THREE.LinearFilter;
-
-const maskCanvas = document.createElement('canvas');
-maskCanvas.width = TEX_SIZE;
-maskCanvas.height = TEX_SIZE;
-const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
-
-// ─── Texture compositing: video + person mask → effect per quad ─────────
-function updateEffectTexture(effectType) {
-  // Draw mirrored video
-  effectCtx.save();
-  effectCtx.translate(TEX_SIZE, 0);
-  effectCtx.scale(-1, 1);
-  effectCtx.drawImage(videoEl, 0, 0, TEX_SIZE, TEX_SIZE);
-  effectCtx.restore();
-
-  if (!personMaskData) {
-    effectTexture.needsUpdate = true;
-    return;
-  }
-
-  const imgData = effectCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE);
-  const px = imgData.data;
-  const EDGE_RADIUS = 6;
-  const S = TEX_SIZE;
-
-  for (let y = 0; y < S; y++) {
-    const v = y / S;
-    for (let x = 0; x < S; x++) {
-      const u = x / S;
-      const mi = (y * S + x) * 4;
-      const m = personMaskData[mi] / 255;
-
-      if (m < 0.2) {
-        // Background: make transparent
-        px[mi + 3] = 0;
-        continue;
-      }
-
-      if (effectType === 'redOutline') {
-        if (isMaskEdge(u, v, EDGE_RADIUS, S)) {
-          px[mi] = 185; px[mi+1] = 23; px[mi+2] = 48; px[mi+3] = 230;
-        } else {
-          px[mi + 3] = 0; // person interior transparent (show base)
-        }
-      } else if (effectType === 'whiteSilhouette') {
-        // White fill for person area
-        px[mi] = 245; px[mi+1] = 243; px[mi+2] = 236;
-        px[mi+3] = Math.floor(m * 220);
-      } else if (effectType === 'greenOutline') {
-        if (isMaskEdge(u, v, EDGE_RADIUS, S)) {
-          px[mi] = 10; px[mi+1] = 162; px[mi+2] = 52; px[mi+3] = 230;
-        } else {
-          px[mi + 3] = 0;
-        }
-      }
-    }
-  }
-
-  effectCtx.putImageData(imgData, 0, 0);
-  effectTexture.needsUpdate = true;
-}
-
-function sampleMask(u, v) {
-  if (!personMaskData) return 0;
-  const px = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(u * TEX_SIZE)));
-  const py = Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(v * TEX_SIZE)));
-  return personMaskData[(py * TEX_SIZE + px) * 4] / 255;
-}
-
-function isMaskEdge(u, v, radius, S) {
-  if (sampleMask(u, v) < 0.3) return false;
-  const du = radius / S;
-  const dv = radius / S;
-  return sampleMask(u-du,v) < 0.3 || sampleMask(u+du,v) < 0.3 ||
-         sampleMask(u,v-dv) < 0.3 || sampleMask(u,v+dv) < 0.3;
-}
-
 // ─── Quad Geometry ──────────────────────────────────────────────────────
 const quads = [];
 const connectionLines = [];
 const quadGroup = new THREE.Group();
 scene.add(quadGroup);
+
+// Effect config per quad: [effectType, baseColor, edgeColor]
+const EFFECTS = [
+  { type: 0, base: [0.96, 0.96, 0.91], edge: [0.72, 0.05, 0.13] },  // red outline on white
+  { type: 1, base: [0.04, 0.16, 0.28], edge: [0.96, 0.96, 0.91] },  // white silhouette on blue
+  { type: 2, base: [0.96, 0.96, 0.91], edge: [0.10, 0.55, 0.18] },  // green outline on white
+];
+
+const FRAG_SHADER = `
+  precision highp float;
+  uniform sampler2D uVideo;
+  uniform sampler2D uMask;
+  uniform int uEffectType;
+  uniform vec3 uBaseColor;
+  uniform vec3 uEdgeColor;
+  uniform float uTime;
+  uniform float uHasMask;
+  varying vec2 vUv;
+
+  void main() {
+    // Mirror UV horizontally for selfie view
+    vec2 uv = vec2(1.0 - vUv.x, vUv.y);
+    vec4 video = texture2D(uVideo, uv);
+
+    // Sample mask (grayscale stored in R channel)
+    float m = texture2D(uMask, uv).r;
+
+    if (uHasMask < 0.5) {
+      // No mask yet: show base color
+      gl_FragColor = vec4(uBaseColor, 0.96);
+      return;
+    }
+
+    // Background area: base color
+    if (m < 0.2) {
+      gl_FragColor = vec4(uBaseColor, 0.96);
+      return;
+    }
+
+    vec3 col;
+    float alpha = 0.96;
+
+    if (uEffectType == 0 || uEffectType == 2) {
+      // Red/Green outline: detect mask edges
+      float e = 0.008; // edge sample offset
+      float mR = texture2D(uMask, uv + vec2(e, 0.0)).r;
+      float mL = texture2D(uMask, uv - vec2(e, 0.0)).r;
+      float mU = texture2D(uMask, uv + vec2(0.0, e)).r;
+      float mD = texture2D(uMask, uv - vec2(0.0, e));
+      float edge = step(m, 0.2) * 0.0 +
+        (1.0 - step(m, 0.2)) *
+        max(max(abs(m - mR), abs(m - mL)), max(abs(m - mU), abs(m - mD)));
+
+      if (edge > 0.08) {
+        // Edge pixel: colored outline
+        col = uEdgeColor;
+        alpha = 0.95;
+      } else {
+        // Person interior: transparent (show base)
+        gl_FragColor = vec4(uBaseColor, 0.96);
+        return;
+      }
+    } else {
+      // White silhouette: fill person area with white
+      col = uEdgeColor;
+      alpha = m * 0.9;
+    }
+
+    // Subtle pulse on edges
+    float pulse = 0.5 + 0.5 * sin(uTime * 2.0 + vUv.x * 6.28);
+    col += uEdgeColor * 0.05 * pulse;
+
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+
+const VERT_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
 
 for (let i = 0; i < QUAD_COUNT; i++) {
   const geo = new THREE.BufferGeometry();
@@ -160,52 +156,23 @@ for (let i = 0; i < QUAD_COUNT; i++) {
   geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0,1, 1,1, 1,0, 0,0]), 2));
   geo.setIndex([0, 1, 2, 0, 2, 3]);
 
-  const baseColor = i === 1 ? [0.04, 0.16, 0.28] : [0.96, 0.96, 0.91];
-
+  const eff = EFFECTS[i];
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     side: THREE.DoubleSide,
     uniforms: {
-      uTexture: { value: effectTexture },
-      uBaseColor: { value: new THREE.Color(baseColor[0], baseColor[1], baseColor[2]) },
-      uGlow: { value: 0.0 },
-      uTime: { value: 0.0 },
+      uVideo: { value: null },
+      uMask: { value: null },
+      uEffectType: { value: eff.type },
+      uBaseColor: { value: new THREE.Color(eff.base[0], eff.base[1], eff.base[2]) },
+      uEdgeColor: { value: new THREE.Color(eff.edge[0], eff.edge[1], eff.edge[2]) },
+      uTime: { value: 0 },
+      uHasMask: { value: 0 },
     },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D uTexture;
-      uniform vec3 uBaseColor;
-      uniform float uGlow;
-      uniform float uTime;
-      varying vec2 vUv;
-
-      void main() {
-        vec4 tex = texture2D(uTexture, vUv);
-
-        // Where tex.a > 0: use effect (person area with video + overlay)
-        // Where tex.a == 0: use base color (background or person interior)
-        vec3 col = mix(uBaseColor, tex.rgb, tex.a);
-
-        // Subtle edge glow
-        float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-        float edge = 1.0 - smoothstep(0.0, 0.03, edgeDist);
-        col += vec3(0.5, 0.06, 0.1) * edge * 0.3;
-
-        // Glow pulse
-        float pulse = 0.5 + 0.5 * sin(uTime * 2.4 + vUv.x * 8.0);
-        col += vec3(0.0, 0.55, 0.12) * uGlow * 0.1 * pulse;
-
-        gl_FragColor = vec4(col, 0.96);
-      }
-    `,
+    vertexShader: VERT_SHADER,
+    fragmentShader: FRAG_SHADER,
   });
 
   const mesh = new THREE.Mesh(geo, mat);
@@ -238,25 +205,31 @@ function smoothLandmarks(prev, curr, factor) {
 // ─── MediaPipe callbacks ────────────────────────────────────────────────
 function onHandResults(results) {
   const raw = (results.multiHandLandmarks || []).slice();
-  if (raw.length === 0) { handData = []; smoothHands = [null, null]; return; }
+  if (raw.length === 0) { smoothHands = [null, null]; return; }
   if (raw.length === 2) raw.sort((a, b) => lmToNDC(a[9]).x - lmToNDC(b[9]).x);
-  handData = raw;
   const next = [null, null];
-  for (let h = 0; h < handData.length; h++) {
-    next[h] = smoothLandmarks(smoothHands[h], handData[h], SMOOTHING);
+  for (let h = 0; h < raw.length; h++) {
+    next[h] = smoothLandmarks(smoothHands[h], raw[h], SMOOTHING);
   }
   smoothHands = next;
 }
 
-function onFaceResults(results) {
-  faceLandmarks = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || [];
-}
+function onFaceResults(results) { /* faceLandmarks = ... */ }
 
 function onSegmentationResults(results) {
-  if (results.segmentationMask) {
-    maskCtx.drawImage(results.segmentationMask, 0, 0, TEX_SIZE, TEX_SIZE);
-    personMaskData = maskCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data;
+  if (!results.segmentationMask) return;
+
+  // Update mask texture from segmentation mask element
+  if (!maskTexture) {
+    maskTexture = new THREE.Texture(results.segmentationMask);
+    maskTexture.minFilter = THREE.LinearFilter;
+    maskTexture.magFilter = THREE.LinearFilter;
+    maskTexture.generateMipmaps = false;
+  } else {
+    maskTexture.image = results.segmentationMask;
   }
+  maskTexture.needsUpdate = true;
+  hasMask = true;
 }
 
 // ─── Load models ────────────────────────────────────────────────────────
@@ -298,6 +271,17 @@ async function startCamera() {
     videoEl.srcObject = stream;
     await videoEl.play();
 
+    // Create video texture
+    videoTexture = new THREE.VideoTexture(videoEl);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.magFilter = THREE.LinearFilter;
+    videoTexture.generateMipmaps = false;
+
+    // Set video texture on all quads
+    for (const q of quads) {
+      q.mat.uniforms.uVideo.value = videoTexture;
+    }
+
     const W = videoEl.videoWidth || 1280;
     const H = videoEl.videoHeight || 720;
     const aspect = window.innerWidth / window.innerHeight;
@@ -311,7 +295,7 @@ async function startCamera() {
     }
     camera.updateProjectionMatrix();
 
-    // Tracking loop (separate from render)
+    // Tracking loop
     let trackFrame = 0;
     async function track() {
       if (videoEl.readyState >= 2) {
@@ -328,11 +312,15 @@ async function startCamera() {
     const start = performance.now();
     function render(now) {
       const time = (now - start) / 1000;
-      updateQuads(time);
-      // Update texture with current effect (rotate per frame for perf)
-      if (personMaskData) {
-        updateEffectTexture(EFFECT_TYPES[Math.floor(time * 0.5) % QUAD_COUNT]);
+
+      // Update mask texture on all quads
+      for (const q of quads) {
+        q.mat.uniforms.uMask.value = maskTexture;
+        q.mat.uniforms.uHasMask.value = hasMask ? 1.0 : 0.0;
+        q.mat.uniforms.uTime.value = time;
       }
+
+      updateQuads(time);
       renderer.render(scene, camera);
       requestAnimationFrame(render);
     }
@@ -347,9 +335,8 @@ async function startCamera() {
   }
 }
 
-// ─── Update quad positions ──────────────────────────────────────────────
+// ─── Landmark helpers ───────────────────────────────────────────────────
 function lmToNDC(lm) { return { x: -(lm.x * 2 - 1), y: -(lm.y * 2 - 1) }; }
-
 const FINGER_MCP = { 4: 2, 8: 5, 12: 9, 16: 13, 20: 17 };
 const FINGER_PIP = { 4: 3, 8: 6, 12: 10, 16: 14, 20: 18 };
 
@@ -371,6 +358,7 @@ function ribbonAnchor(landmarks, tipIdx, handSide) {
   return { x: ndc.x + (dx / len) * spread + handSide * 0.006, y: ndc.y + (dy / len) * spread, z };
 }
 
+// ─── Update quad positions ──────────────────────────────────────────────
 function updateQuads(time) {
   const hands = smoothHands;
   if (!hands[0] || !hands[1]) { quadGroup.visible = false; return; }
@@ -390,15 +378,12 @@ function updateQuads(time) {
     const lt = Ltips[i], rt = Rtips[i], rb = Rtips[i+1], lb = Ltips[i+1];
 
     // Degenerate detection → triangle merge
-    const MERGE_THRESHOLD = 0.045;
-    const distLT_RT = Math.hypot(lt.x - rt.x, lt.y - rt.y);
-    const distLB_RB = Math.hypot(lb.x - rb.x, lb.y - rb.y);
-    const distLT_LB = Math.hypot(lt.x - lb.x, lt.y - lb.y);
-    const distRT_RB = Math.hypot(rt.x - rb.x, rt.y - rb.y);
-    const mergeTop = distLT_RT < MERGE_THRESHOLD;
-    const mergeBot = distLB_RB < MERGE_THRESHOLD;
-    const mergeLeft = distLT_LB < MERGE_THRESHOLD;
-    const mergeRight = distRT_RB < MERGE_THRESHOLD;
+    const MT = 0.045;
+    const dTR = Math.hypot(lt.x - rt.x, lt.y - rt.y);
+    const dBR = Math.hypot(lb.x - rb.x, lb.y - rb.y);
+    const dTL = Math.hypot(lt.x - lb.x, lt.y - lb.y);
+    const dRR = Math.hypot(rt.x - rb.x, rt.y - rb.y);
+    const mergeTop = dTR < MT, mergeBot = dBR < MT, mergeLeft = dTL < MT, mergeRight = dRR < MT;
     if ([mergeTop, mergeBot, mergeLeft, mergeRight].filter(Boolean).length >= 3) {
       mesh.visible = false; line.visible = false; continue;
     }
@@ -418,8 +403,7 @@ function updateQuads(time) {
     geo.attributes.position.needsUpdate = true;
     geo.computeVertexNormals();
 
-    mat.uniforms.uTime.value = time;
-    mat.uniforms.uGlow.value = globalGlow;
+    mat.uniforms.uGlow && (mat.uniforms.uGlow.value = globalGlow);
 
     const lp = lineGeo.attributes.position.array;
     lp[0] = verts[0].x; lp[1] = verts[0].y; lp[2] = depth + 0.001;
