@@ -141,10 +141,112 @@
     const QUAD_COUNT = 3;
     const FINGER_TIPS = [4, 8, 12, 20];
     const SMOOTHING = 0.42;
+    // --- Effect Registry ---------------------------------------------------------
+    const FX = [
+      { // 0: Red Halftone (original)
+        name: 'RedHalftone',
+        c1: [0.96,0.94,0.91], c2: [0.96,0.94,0.91], c3: [0.77,0.07,0.19],
+        code: `vec3 fx_0(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          float ht = halftone(suv, lum, 80.0);
+          if(edg>0.12) return uColor3;
+          if(isP) return mix(uColor1, uColor3, ht*0.65);
+          return uColor1;}`,
+      },
+      { // 1: Blue Posterize (original)
+        name: 'BluePoster',
+        c1: [0.05,0.17,0.27], c2: [0.16,0.48,0.23], c3: [0.77,0.07,0.19],
+        code: `vec3 fx_1(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          if(edg>0.10) return uColor3;
+          if(isP){ vec3 q=posterize(bg,2.0); return (q.r-q.b)>0.0 ? uColor2 : uColor1; }
+          return uColor1;}`,
+      },
+      { // 2: Green Halftone (original)
+        name: 'GreenHalf',
+        c1: [0.96,0.94,0.91], c2: [0.96,0.94,0.91], c3: [0.16,0.48,0.23],
+        code: `vec3 fx_2(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          float ht = halftone(suv, lum, 80.0);
+          if(edg>0.12) return uColor3;
+          if(isP) return mix(uColor1, uColor3, ht*0.55);
+          return uColor1;}`,
+      },
+      { // 3: Lichtenstein
+        name: 'Lichtenstein',
+        c1: [1.0,0.98,0.94], c2: [1.0,0.98,0.94], c3: [0.85,0.11,0.15],
+        code: `vec3 fx_3(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          float e2 = 0.008;
+          float ex = length(texture2D(uGrab,suv+vec2(e2,0)).rgb-texture2D(uGrab,suv-vec2(e2,0)).rgb)
+                   + length(texture2D(uGrab,suv+vec2(0,e2)).rgb-texture2D(uGrab,suv-vec2(0,e2)).rgb);
+          if(ex > 0.18) return vec3(0.05);
+          if(isP){ float ht=halftone(suv,lum,25.0); return mix(uColor1,uColor3,ht*0.85); }
+          return uColor1;}`,
+      },
+      { // 4: Neon Glow
+        name: 'NeonGlow',
+        c1: [0.02,0.02,0.05], c2: [0.0,0.8,1.0], c3: [1.0,0.1,0.6],
+        code: `vec3 fx_4(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          float glow = edg * 4.0;
+          if(edg > 0.04){
+            vec3 gc = mix(uColor2, uColor3, smoothstep(0.04,0.18,edg));
+            return gc * (1.0 + glow);
+          }
+          if(isP) return uColor1 + uColor2*0.04;
+          return uColor1;}`,
+      },
+      { // 5: Thermal
+        name: 'Thermal',
+        c1: [0.0,0.05,0.35], c2: [0.9,0.85,0.1], c3: [0.9,0.1,0.05],
+        code: `vec3 fx_5(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          vec3 c1=uColor1, c2=uColor2, c3=uColor3;
+          return lum<0.33 ? mix(c1,c2,lum/0.33)
+               : lum<0.66 ? mix(c2,c3,(lum-0.33)/0.33)
+               : mix(c3,vec3(1.0),(lum-0.66)/0.34);}`,
+      },
+      { // 6: Pop Art 4-Color — Warhol style, 4 high-saturation color bands
+        name: 'PopArt4',
+        c1: [0.95,0.25,0.30], c2: [0.15,0.55,0.90], c3: [0.95,0.85,0.15],
+        code: `vec3 fx_6(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          vec3 c;
+          if(lum < 0.25)      c = uColor1;
+          else if(lum < 0.50) c = uColor2;
+          else if(lum < 0.75) c = uColor3;
+          else                c = vec3(0.2,0.75,0.4);
+          if(edg > 0.10) c *= 0.3;
+          return c;}`,
+      },
+      { // 7: Glitch — RGB channel separation + scanlines
+        name: 'Glitch',
+        c1: [1.0,0.0,0.0], c2: [0.0,1.0,0.0], c3: [0.0,0.0,1.0],
+        code: `vec3 fx_7(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          vec2 uv = vec2(suv.x*uKx+(1.0-uKx)*0.5, suv.y*uKy+(1.0-uKy)*0.5);
+          float off = 0.008;
+          float r = texture2D(uGrab, uv + vec2(-off, 0.0)).r;
+          float g = texture2D(uGrab, uv).g;
+          float b = texture2D(uGrab, uv + vec2( off, 0.0)).b;
+          float scan = 0.9 + 0.1 * step(0.5, fract(suv.y * 120.0));
+          return vec3(r, g, b) * scan;}`,
+      },
+      { // 8: Red Halftone — original style, halftone dots on entire image
+        name: 'RedHalf',
+        c1: [0.96,0.94,0.91], c2: [0.96,0.94,0.91], c3: [0.77,0.07,0.19],
+        code: `vec3 fx_8(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          float ht = halftone(suv, lum, 80.0);
+          if(edg > 0.12) return uColor3;
+          return mix(uColor1, uColor3, ht * 0.65);}`,
+      },
+      { // 9: Sketch — pencil drawing style, grayscale + strong edges
+        name: 'Sketch',
+        c1: [0.95,0.93,0.88], c2: [0.95,0.93,0.88], c3: [0.12,0.10,0.08],
+        code: `vec3 fx_9(vec2 suv, vec3 bg, float m, float lum, float edg, bool isP){
+          if(edg > 0.06) return uColor3;
+          return vec3(0.96 - lum * 0.45);}`,
+      },
+    ];
+
+    // --- Quad assignments (swap fxIdx to reassign effects to quads) ---------------
     const EFFECTS = [
-      { type: 0, stencilRef: 1, color1: [0.96, 0.94, 0.91], color2: [0.96, 0.94, 0.91], color3: [0.77, 0.07, 0.19] },
-      { type: 1, stencilRef: 2, color1: [0.05, 0.17, 0.27], color2: [0.16, 0.48, 0.23], color3: [0.77, 0.07, 0.19] },
-      { type: 2, stencilRef: 4, color1: [0.96, 0.94, 0.91], color2: [0.96, 0.94, 0.91], color3: [0.16, 0.48, 0.23] },
+      { stencilRef: 1, fxIdx: 6 },   // PopArt4: 波普四色
+      { stencilRef: 2, fxIdx: 9 },   // Sketch: 素描
+      { stencilRef: 4, fxIdx: 8 },   // RedHalf: 红色halftone
     ];
 
     // --- State --------------------------------------------------------------------
@@ -233,7 +335,7 @@
   precision mediump float;
   uniform sampler2D uGrab;
   uniform sampler2D uMask;
-  uniform float uEffectType;
+  uniform float uEffectIdx;
   uniform vec3  uColor1;
   uniform vec3  uColor2;
   uniform vec3  uColor3;
@@ -244,53 +346,34 @@
   uniform float uKy;
   varying vec2 vUv;
 
-  vec3 posterize(vec3 col, float steps) {
-    return floor(col * steps + 0.5) / steps;
-  }
+  vec3 posterize(vec3 c, float s) { return floor(c*s+0.5)/s; }
+
   float imageEdge(vec2 uv) {
     float e = 0.005;
     vec3 c = texture2D(uGrab, uv).rgb;
-    vec3 r = texture2D(uGrab, uv + vec2(e,  0.0)).rgb;
-    vec3 u = texture2D(uGrab, uv + vec2(0.0, e)).rgb;
-    return length(c - r) + length(c - u);
-  }
-  float halftone(vec2 uv, float brightness, float scale) {
-    vec2 p = fract(vec2(uv.x * uAspect, uv.y) * scale) - 0.5;
-    return step(length(p), (1.0 - brightness) * 0.45);
+    return length(c - texture2D(uGrab, uv+vec2(e,0)).rgb)
+         + length(c - texture2D(uGrab, uv+vec2(0,e)).rgb);
   }
 
+  float halftone(vec2 uv, float br, float sc) {
+    vec2 p = fract(vec2(uv.x*uAspect, uv.y)*sc) - 0.5;
+    return step(length(p), (1.0-br)*0.45);
+  }
+
+  ${FX.map(f => f.code).join('\n')}
+
   void main() {
-    // Horizontal mirror to match CSS scaleX(-1) on the <video> element.
-    // Texture itself is NOT flipped (see startCamera); we flip the UV here instead.
     float sx = 1.0 - vUv.x;
-    // Remap screen UV into visible portion of texture (object-fit:cover correction)
-    vec2 cUv = vec2(
-      sx   * uKx + (1.0 - uKx) * 0.5,
-      vUv.y * uKy + (1.0 - uKy) * 0.5
-    );
-    vec3  bg       = texture2D(uGrab, cUv).rgb;
-    float m        = uHasMask > 0.5 ? texture2D(uMask, cUv).r : 0.0;
-    float lum      = dot(bg, vec3(0.299, 0.587, 0.114));
-    float edg      = imageEdge(cUv);
-    bool  isPerson = m > 0.35;
-    vec3 col;
-    if (uEffectType < 0.5) {
-      float ht = halftone(vec2(sx, vUv.y), lum, 80.0);
-      if (edg > 0.12)     col = uColor3;
-      else if (isPerson)  col = mix(uColor1, uColor3, ht * 0.65);
-      else                col = uColor1;
-    } else if (uEffectType < 1.5) {
-      vec3  q = posterize(bg, 2.0);
-      float w = q.r - q.b;
-      if (edg > 0.10)     col = uColor3;
-      else if (isPerson)  col = w > 0.0 ? uColor2 : uColor1;
-      else                col = uColor1;
-    } else {
-      float ht = halftone(vec2(sx, vUv.y), lum, 80.0);
-      if (edg > 0.12)     col = uColor3;
-      else if (isPerson)  col = mix(uColor1, uColor3, ht * 0.55);
-      else                col = uColor1;
-    }
+    vec2 cUv = vec2(sx*uKx+(1.0-uKx)*0.5, vUv.y*uKy+(1.0-uKy)*0.5);
+    vec3  bg  = texture2D(uGrab, cUv).rgb;
+    float m   = uHasMask > 0.5 ? texture2D(uMask, cUv).r : 0.0;
+    float lum = dot(bg, vec3(0.299,0.587,0.114));
+    float edg = imageEdge(cUv);
+    bool  isP = m > 0.35;
+    vec2  suv = vec2(sx, vUv.y);
+    vec3  col;
+    ${FX.map((_,i) => `${i===0?'':'else '}if(uEffectIdx<${i+0.5}) col=fx_${i}(suv,bg,m,lum,edg,isP);`).join('\n    ')}
+    else col = bg;
     gl_FragColor = vec4(mix(bg, col, uFade), 1.0);
   }
 `;
@@ -298,14 +381,10 @@
     const effectPasses = [];
     for (let i = 0; i < QUAD_COUNT; i++) {
       const eff = EFFECTS[i];
+      const fx  = FX[eff.fxIdx];
       const geo = new THREE.PlaneGeometry(2, 2);
       const mat = new THREE.ShaderMaterial({
         depthTest: false, depthWrite: false,
-        // Stencil READ-ONLY: test against stencilRef, but keep the buffer unchanged.
-        // stencilWrite MUST be true — Three.js uses it to decide whether to call
-        // gl.enable(gl.STENCIL_TEST).  stencilWriteMask 0xFF keeps the mask open;
-        // 0x00 would call gl.stencilMask(0x00) which disables the test entirely
-        // in Three.js's state cache, breaking the masking pipeline.
         stencilWrite: true, stencilWriteMask: 0xFF,
         stencilRef: eff.stencilRef, stencilFunc: THREE.EqualStencilFunc,
         stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp,
@@ -313,10 +392,10 @@
         uniforms: {
           uGrab: { value: DUMMY_TEX },
           uMask: { value: DUMMY_MASK },
-          uEffectType: { value: eff.type },
-          uColor1: { value: new THREE.Color(...eff.color1) },
-          uColor2: { value: new THREE.Color(...eff.color2) },
-          uColor3: { value: new THREE.Color(...eff.color3) },
+          uEffectIdx: { value: eff.fxIdx + 0.0 },
+          uColor1: { value: new THREE.Color(...fx.c1) },
+          uColor2: { value: new THREE.Color(...fx.c2) },
+          uColor3: { value: new THREE.Color(...fx.c3) },
           uHasMask: { value: 0 },
           uFade: { value: 1.0 },
           uAspect: { value: window.innerWidth / window.innerHeight },
@@ -493,13 +572,15 @@
 
           updateQuads();
 
-          const vis = stencilQuads.map((q, i) => q.mesh.visible ? `[${EFFECTS[i].stencilRef}]` : '[-]');
+          const vis = stencilQuads.map((q, i) => {
+            const name = FX[EFFECTS[i].fxIdx].name;
+            return q.mesh.visible ? name : '[-]';
+          });
           debugEl.textContent =
             'hands: ' + (smoothHands[0] ? 'L' : '-') + (smoothHands[1] ? 'R' : '-') +
             '  fade: ' + fade.toFixed(2) +
-            '  quads: ' + (quadGroup.visible ? vis.join('') : 'off') +
-            '  mask: ' + (hasMask ? 'yes' : 'no') +
-            '  va:' + videoAspect.toFixed(2) + ' sa:' + screenAspect.toFixed(2);
+            '  fx: ' + vis.join(' | ') +
+            '  mask: ' + (hasMask ? 'Y' : 'N');
 
           renderer.render(scene, camera);
           requestAnimationFrame(render);
